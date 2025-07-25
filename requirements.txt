@@ -11,3 +11,8 @@ pycolmap>=3.12.3
 kornia>=0.6.11
 gdown
 lightglue @ git+https://github.com/cvg/LightGlue
+# New dependencies for improved pipeline
+gtsam  # For pose graph optimization (optional - falls back to SciPy)
+scikit-learn  # For additional optimization utilities
+scipy>=1.7.0  # Updated version for spatial.transform.Rotation
+torch>=1.8.0  # Updated for better CUDA support in LightGlue
