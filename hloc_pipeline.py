@@ -5,7 +5,7 @@ Improved HLoc Pipeline Implementation
 This pipeline implements the following improvements over standard HLoc:
 1. SuperPoint + LightGlue feature matching (vs SuperGlue)
 2. LightGlue's inlier mask for geometric verification (vs separate RANSAC)
-3. DEGENSAC for robust pose estimation (vs standard methods)
+3. DEGENSAC/LoRANSAC for robust pose estimation (vs standard methods)
 4. GTSAM-based pose graph optimization (vs COLMAP dependency)
 5. Direct triangulation implementation (vs COLMAP dependency)
 
@@ -37,7 +37,8 @@ class ImprovedHLocPipeline:
                  images_dir: Path,
                  output_dir: Path,
                  feature_conf: str = "superpoint_aachen",
-                 matcher_conf: str = "superpoint+lightglue"):
+                 matcher_conf: str = "superpoint+lightglue",
+                 pose_method: str = "degensac"):
         
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
@@ -45,6 +46,7 @@ class ImprovedHLocPipeline:
         
         self.feature_conf = feature_conf
         self.matcher_conf = matcher_conf
+        self.pose_method = pose_method
         
         # Pipeline outputs
         self.features_path = self.output_dir / "features.h5"
@@ -214,7 +216,7 @@ class ImprovedHLocPipeline:
         
     def estimate_pairwise_poses(self, 
                                intrinsics: Optional[Dict[str, np.ndarray]] = None) -> Dict:
-        """Estimate pairwise poses using DEGENSAC"""
+        """Estimate pairwise poses using DEGENSAC or LoRANSAC"""
         
         pose_estimates = {}
         
@@ -256,10 +258,11 @@ class ImprovedHLocPipeline:
                             "K2": intrinsics.get(img_name2)
                         }
                         
-                    # Estimate pose using DEGENSAC
+                    # Estimate pose using selected method (DEGENSAC or LoRANSAC)
                     pose_result = estimate_relative_pose(
                         kpts1, kpts2, valid_matches, 
                         camera_params=camera_params,
+                        method=self.pose_method,
                         max_iterations=5000,
                         threshold=1.0
                     )
@@ -459,6 +462,9 @@ def main():
                        help="Feature extraction configuration")
     parser.add_argument("--matcher_conf", type=str, default="superpoint+lightglue",
                        help="Feature matcher configuration")
+    parser.add_argument("--pose_method", type=str, default="degensac", 
+                       choices=["degensac", "loransac"],
+                       help="Pose estimation method (degensac or loransac)")
     parser.add_argument("--max_pairs", type=int, default=5000,
                        help="Maximum number of image pairs")
     parser.add_argument("--skip_pose_optimization", action="store_true",
@@ -479,7 +485,8 @@ def main():
         images_dir=args.images_dir,
         output_dir=args.output_dir,
         feature_conf=args.feature_conf,
-        matcher_conf=args.matcher_conf
+        matcher_conf=args.matcher_conf,
+        pose_method=args.pose_method
     )
     
     results = pipeline.run_full_pipeline(
