@@ -22,8 +22,14 @@ class ImprovedMatcher:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Load LightGlue matcher
-        from .matchers import lightglue
-        self.matcher = lightglue.LightGlue(conf["matcher"]).eval().to(self.device)
+        try:
+            from .matchers import lightglue
+            self.matcher = lightglue.LightGlue(conf["matcher"]).eval().to(self.device)
+        except ImportError:
+            # Fallback to basic matcher if LightGlue not available
+            logger.warning("LightGlue not available, using basic matcher")
+            from .matchers import nearest_neighbor
+            self.matcher = nearest_neighbor.NearestNeighbor(conf["matcher"])
         
     @torch.no_grad()
     def match_pair(self, data0: Dict, data1: Dict) -> Dict:
@@ -74,7 +80,16 @@ def main(
     
     # Load image pairs
     if isinstance(pairs, (Path, str)):
-        pairs_name = parse_image_lists(pairs)
+        # Parse pairs file directly
+        pairs_name = []
+        with open(pairs, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if len(line) == 0 or line[0] == "#":
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    pairs_name.append((parts[0], parts[1]))
     elif isinstance(pairs, collections.Iterable):
         pairs_name = list(pairs)
     else:
@@ -122,19 +137,24 @@ def main(
             continue
             
         # Match features
-        pred = matcher.match_pair(data0, data1)
-        
-        # Save matches
-        with h5py.File(str(matches), "a", libver="latest") as fd:
-            if pair_name in fd:
-                del fd[pair_name]
-            grp = fd.create_group(pair_name)
+        try:
+            pred = matcher.match_pair(data0, data1)
             
-            grp.create_dataset("matches0", data=pred["matches0"])
-            grp.create_dataset("matching_scores0", data=pred["matching_scores0"])
-            
-            if pred["inlier_mask"] is not None:
-                grp.create_dataset("inlier_mask", data=pred["inlier_mask"])
+            # Save matches
+            with h5py.File(str(matches), "a", libver="latest") as fd:
+                if pair_name in fd:
+                    del fd[pair_name]
+                grp = fd.create_group(pair_name)
+                
+                grp.create_dataset("matches0", data=pred["matches0"])
+                grp.create_dataset("matching_scores0", data=pred["matching_scores0"])
+                
+                if pred["inlier_mask"] is not None:
+                    grp.create_dataset("inlier_mask", data=pred["inlier_mask"])
+                    
+        except Exception as e:
+            logger.warning(f"Failed to match pair {pair_name}: {e}")
+            continue
                 
     feature_file.close()
     logger.info("Finished matching features.")

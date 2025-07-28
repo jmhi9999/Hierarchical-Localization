@@ -475,7 +475,7 @@ class ImprovedHLocPipeline:
         
         # Save poses
         with open(self.poses_path, 'w') as f:
-            f.write("# Image poses (image_name qw qx qy qz tx ty tz)\\n")
+            f.write("# Image poses (image_name qw qx qy qz tx ty tz)\n")
             for img_id, pose in poses.items():
                 R = pose["R"]
                 t = pose["t"].flatten()
@@ -486,14 +486,14 @@ class ImprovedHLocPipeline:
                 quat = [quat[3], quat[0], quat[1], quat[2]]  # [w, x, y, z]
                 
                 f.write(f"{img_id} {quat[0]:.6f} {quat[1]:.6f} {quat[2]:.6f} {quat[3]:.6f} "
-                       f"{t[0]:.6f} {t[1]:.6f} {t[2]:.6f}\\n")
+                       f"{t[0]:.6f} {t[1]:.6f} {t[2]:.6f}\n")
                        
         # Save 3D points
         with open(self.points_path, 'w') as f:
-            f.write("# 3D points (point_id x y z)\\n")
+            f.write("# 3D points (point_id x y z)\n")
             for point_id, point_data in points_3d.items():
                 xyz = point_data["xyz"]
-                f.write(f"{point_id} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}\\n")
+                f.write(f"{point_id} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}\n")
                 
         logger.info(f"Saved {len(poses)} poses to {self.poses_path}")
         logger.info(f"Saved {len(points_3d)} points to {self.points_path}")
