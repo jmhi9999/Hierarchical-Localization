@@ -220,9 +220,22 @@ class ImprovedHLocPipeline:
         
         pose_estimates = {}
         
+        # Check if files exist
+        if not self.matches_path.exists():
+            logger.error(f"Matches file not found: {self.matches_path}")
+            return pose_estimates
+            
+        if not self.features_path.exists():
+            logger.error(f"Features file not found: {self.features_path}")
+            return pose_estimates
+        
         # Load matches and features
-        matches_file = h5py.File(str(self.matches_path), "r")
-        features_file = h5py.File(str(self.features_path), "r")
+        try:
+            matches_file = h5py.File(str(self.matches_path), "r")
+            features_file = h5py.File(str(self.features_path), "r")
+        except Exception as e:
+            logger.error(f"Failed to open files: {e}")
+            return pose_estimates
         
         try:
             for pair_name in matches_file.keys():
@@ -244,10 +257,20 @@ class ImprovedHLocPipeline:
                     kpts2 = features_file[img_name2]["keypoints"].__array__()
                     matches = pair_data["matches0"].__array__()
                     
+                    # Check data validity
+                    if len(kpts1) == 0 or len(kpts2) == 0:
+                        logger.debug(f"Skipping pair {pair_name}: no keypoints")
+                        continue
+                        
+                    if len(matches) == 0:
+                        logger.debug(f"Skipping pair {pair_name}: no matches")
+                        continue
+                    
                     # Filter valid matches
                     valid_matches = matches[matches[:, 1] != -1]
                     
                     if len(valid_matches) < 8:  # Need minimum for fundamental matrix
+                        logger.debug(f"Skipping pair {pair_name}: insufficient matches ({len(valid_matches)} < 8)")
                         continue
                         
                     # Prepare camera parameters
@@ -377,6 +400,10 @@ class ImprovedHLocPipeline:
                           intrinsics: Optional[Dict[str, np.ndarray]] = None) -> Dict:
         """Triangulate 3D points using improved direct triangulation"""
         
+        if len(poses) < 2:
+            logger.warning("Insufficient poses for triangulation")
+            return {}
+        
         if intrinsics is None:
             # Use default intrinsics (would normally extract from EXIF or calibration)
             logger.warning("Using default camera intrinsics")
@@ -390,12 +417,16 @@ class ImprovedHLocPipeline:
         
         # Load matches data
         matches_data = {}
-        with h5py.File(str(self.matches_path), "r") as f:
-            for pair_name in f.keys():
-                pair_data = f[pair_name]
-                matches_data[pair_name] = {
-                    "matches0": pair_data["matches0"].__array__()
-                }
+        try:
+            with h5py.File(str(self.matches_path), "r") as f:
+                for pair_name in f.keys():
+                    pair_data = f[pair_name]
+                    matches_data[pair_name] = {
+                        "matches0": pair_data["matches0"].__array__()
+                    }
+        except Exception as e:
+            logger.error(f"Failed to load matches data: {e}")
+            return {}
                 
         # Use improved triangulation with Union-Find track building
         triangulator = DirectTriangulation(
@@ -419,6 +450,10 @@ class ImprovedHLocPipeline:
                          points_3d: Dict,
                          intrinsics: Dict[str, np.ndarray]) -> tuple:
         """Run bundle adjustment optimization using GTSAM or SciPy fallback"""
+        
+        if len(points_3d) == 0:
+            logger.warning("No 3D points for bundle adjustment")
+            return poses, points_3d
         
         # Create observations from triangulated points
         observations = []
@@ -473,30 +508,43 @@ class ImprovedHLocPipeline:
                            points_3d: Dict):
         """Save reconstruction results"""
         
-        # Save poses
-        with open(self.poses_path, 'w') as f:
-            f.write("# Image poses (image_name qw qx qy qz tx ty tz)\n")
-            for img_id, pose in poses.items():
-                R = pose["R"]
-                t = pose["t"].flatten()
-                
-                # Convert rotation matrix to quaternion
-                from scipy.spatial.transform import Rotation
-                quat = Rotation.from_matrix(R).as_quat()  # [x, y, z, w]
-                quat = [quat[3], quat[0], quat[1], quat[2]]  # [w, x, y, z]
-                
-                f.write(f"{img_id} {quat[0]:.6f} {quat[1]:.6f} {quat[2]:.6f} {quat[3]:.6f} "
-                       f"{t[0]:.6f} {t[1]:.6f} {t[2]:.6f}\n")
-                       
-        # Save 3D points
-        with open(self.points_path, 'w') as f:
-            f.write("# 3D points (point_id x y z)\n")
-            for point_id, point_data in points_3d.items():
-                xyz = point_data["xyz"]
-                f.write(f"{point_id} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}\n")
-                
-        logger.info(f"Saved {len(poses)} poses to {self.poses_path}")
-        logger.info(f"Saved {len(points_3d)} points to {self.points_path}")
+        try:
+            # Save poses
+            with open(self.poses_path, 'w') as f:
+                f.write("# Image poses (image_name qw qx qy qz tx ty tz)\n")
+                for img_id, pose in poses.items():
+                    R = pose["R"]
+                    t = pose["t"].flatten()
+                    
+                    # Convert rotation matrix to quaternion
+                    from scipy.spatial.transform import Rotation
+                    quat = Rotation.from_matrix(R).as_quat()  # [x, y, z, w]
+                    quat = [quat[3], quat[0], quat[1], quat[2]]  # [w, x, y, z]
+                    
+                    f.write(f"{img_id} {quat[0]:.6f} {quat[1]:.6f} {quat[2]:.6f} {quat[3]:.6f} "
+                           f"{t[0]:.6f} {t[1]:.6f} {t[2]:.6f}\n")
+                           
+            # Save 3D points
+            with open(self.points_path, 'w') as f:
+                f.write("# 3D points (point_id x y z)\n")
+                for point_id, point_data in points_3d.items():
+                    xyz = point_data["xyz"]
+                    f.write(f"{point_id} {xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f}\n")
+                    
+            logger.info(f"Saved {len(poses)} poses to {self.poses_path}")
+            logger.info(f"Saved {len(points_3d)} points to {self.points_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save reconstruction: {e}")
+            # Try to save at least poses
+            try:
+                with open(self.poses_path, 'w') as f:
+                    f.write("# Image poses (image_name qw qx qy qz tx ty tz)\n")
+                    for img_id, pose in poses.items():
+                        f.write(f"{img_id} 1.0 0.0 0.0 0.0 0.0 0.0 0.0\n")
+                logger.info(f"Saved basic poses to {self.poses_path}")
+            except Exception as e2:
+                logger.error(f"Failed to save even basic poses: {e2}")
 
 
 def main():

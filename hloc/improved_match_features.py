@@ -25,11 +25,16 @@ class ImprovedMatcher:
         try:
             from .matchers import lightglue
             self.matcher = lightglue.LightGlue(conf["matcher"]).eval().to(self.device)
+            logger.info("Successfully loaded LightGlue matcher")
         except ImportError:
             # Fallback to basic matcher if LightGlue not available
             logger.warning("LightGlue not available, using basic matcher")
-            from .matchers import nearest_neighbor
-            self.matcher = nearest_neighbor.NearestNeighbor(conf["matcher"])
+            try:
+                from .matchers import nearest_neighbor
+                self.matcher = nearest_neighbor.NearestNeighbor(conf["matcher"])
+            except ImportError:
+                logger.error("No compatible matcher found")
+                raise
         
     @torch.no_grad()
     def match_pair(self, data0: Dict, data1: Dict) -> Dict:
@@ -49,17 +54,27 @@ class ImprovedMatcher:
         pred = self.matcher(data)
         
         # Extract matches and confidence scores
-        matches0 = pred["matches0"][0].cpu().numpy()
-        matching_scores0 = pred["matching_scores0"][0].cpu().numpy()
+        try:
+            matches0 = pred["matches0"][0].cpu().numpy()
+            matching_scores0 = pred["matching_scores0"][0].cpu().numpy()
+        except (KeyError, IndexError) as e:
+            logger.warning(f"Unexpected prediction format: {e}")
+            # Fallback: create empty matches
+            matches0 = np.array([]).reshape(0, 2)
+            matching_scores0 = np.array([])
         
         # Extract inlier mask if available (this is LightGlue's geometric verification)
         inlier_mask = None
-        if "inlier_mask" in pred:
-            inlier_mask = pred["inlier_mask"][0].cpu().numpy()
-        elif "confidence" in pred:
-            # Use confidence as a proxy for inliers
-            confidence_threshold = self.conf.get("confidence_threshold", 0.8)
-            inlier_mask = matching_scores0 > confidence_threshold
+        try:
+            if "inlier_mask" in pred:
+                inlier_mask = pred["inlier_mask"][0].cpu().numpy()
+            elif "confidence" in pred:
+                # Use confidence as a proxy for inliers
+                confidence_threshold = self.conf.get("confidence_threshold", 0.8)
+                inlier_mask = matching_scores0 > confidence_threshold
+        except (KeyError, IndexError) as e:
+            logger.warning(f"Could not extract inlier mask: {e}")
+            inlier_mask = None
             
         return {
             "matches0": matches0,
@@ -122,14 +137,28 @@ def main(
         
         # Load features for both images
         try:
+            # Load keypoints and descriptors
+            kpts0 = feature_file[name0]["keypoints"].__array__()
+            desc0 = feature_file[name0]["descriptors"].__array__()
+            kpts1 = feature_file[name1]["keypoints"].__array__()
+            desc1 = feature_file[name1]["descriptors"].__array__()
+            
+            # Add confidence scores (set to 1.0 for SuperPoint features)
+            if kpts0.shape[1] == 2:  # Only x, y coordinates
+                confidence0 = np.ones((kpts0.shape[0], 1))
+                kpts0 = np.hstack([kpts0, confidence0])
+            if kpts1.shape[1] == 2:  # Only x, y coordinates
+                confidence1 = np.ones((kpts1.shape[0], 1))
+                kpts1 = np.hstack([kpts1, confidence1])
+            
             data0 = {
-                "keypoints": torch.from_numpy(feature_file[name0]["keypoints"].__array__()),
-                "descriptors": torch.from_numpy(feature_file[name0]["descriptors"].__array__()),
+                "keypoints": torch.from_numpy(kpts0),
+                "descriptors": torch.from_numpy(desc0),
                 "image": torch.zeros((1, 1, 100, 100)),  # Dummy image for LightGlue
             }
             data1 = {
-                "keypoints": torch.from_numpy(feature_file[name1]["keypoints"].__array__()),
-                "descriptors": torch.from_numpy(feature_file[name1]["descriptors"].__array__()),
+                "keypoints": torch.from_numpy(kpts1),
+                "descriptors": torch.from_numpy(desc1),
                 "image": torch.zeros((1, 1, 100, 100)),  # Dummy image for LightGlue
             }
         except KeyError as e:
