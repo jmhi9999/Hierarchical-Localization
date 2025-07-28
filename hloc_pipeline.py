@@ -178,7 +178,7 @@ class ImprovedHLocPipeline:
             feature_path=self.features_path
         )
         
-    def generate_pairs(self, max_pairs: int = 5000):
+    def generate_pairs(self, max_pairs: int = 150000):
         """Generate exhaustive image pairs"""
         if self.pairs_path.exists():
             logger.info(f"Pairs already exist at {self.pairs_path}")

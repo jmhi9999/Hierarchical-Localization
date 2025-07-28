@@ -41,6 +41,24 @@ class ImprovedMatcher:
         """Match features between two images using LightGlue"""
         
         # Prepare data for LightGlue
+
+        def ensure_3cols_float32_contiguous(kpts):
+            kpts = np.ascontiguousarray(kpts, dtype=np.float32)
+            if kpts.ndim != 2:
+                raise ValueError(f"Keypoints must be 2D, got shape {kpts.shape}")
+            if kpts.shape[1] == 2:
+                logger.debug("Keypoints Nx2 detected, adding confidence column for LightGlue compatibility.")
+                confidence = np.ones((kpts.shape[0], 1), dtype=np.float32)
+                kpts = np.hstack([kpts, confidence])
+            elif kpts.shape[1] > 3:
+                logger.debug(f"Keypoints shape {kpts.shape}, truncating to first 3 columns.")
+                kpts = kpts[:, :3]
+            return kpts
+
+        # Ensure keypoints are Nx3, float32, contiguous
+        data0["keypoints"] = torch.from_numpy(ensure_3cols_float32_contiguous(data0["keypoints"].cpu().numpy()))
+        data1["keypoints"] = torch.from_numpy(ensure_3cols_float32_contiguous(data1["keypoints"].cpu().numpy()))
+
         data = {
             "image0": data0["image"].to(self.device, non_blocking=True),
             "keypoints0": data0["keypoints"].to(self.device, non_blocking=True),
@@ -49,10 +67,10 @@ class ImprovedMatcher:
             "keypoints1": data1["keypoints"].to(self.device, non_blocking=True),
             "descriptors1": data1["descriptors"].to(self.device, non_blocking=True),
         }
-        
+
         # Run LightGlue matching
         pred = self.matcher(data)
-        
+
         # Extract matches and confidence scores
         try:
             matches0 = pred["matches0"][0].cpu().numpy()
@@ -62,7 +80,11 @@ class ImprovedMatcher:
             # Fallback: create empty matches
             matches0 = np.array([]).reshape(0, 2)
             matching_scores0 = np.array([])
-        
+
+        # Defensive: ensure matches0 is always 1D or 2D array
+        if matches0.ndim == 1:
+            matches0 = matches0.reshape(-1, 1)
+
         # Extract inlier mask if available (this is LightGlue's geometric verification)
         inlier_mask = None
         try:
@@ -75,7 +97,7 @@ class ImprovedMatcher:
         except (KeyError, IndexError) as e:
             logger.warning(f"Could not extract inlier mask: {e}")
             inlier_mask = None
-            
+
         return {
             "matches0": matches0,
             "matching_scores0": matching_scores0,
@@ -134,7 +156,7 @@ def main(
     # Process pairs
     for name0, name1 in tqdm(pairs_name):
         pair_name = names_to_pair(name0, name1)
-        
+
         # Load features for both images
         try:
             # Load keypoints and descriptors
@@ -142,15 +164,15 @@ def main(
             desc0 = feature_file[name0]["descriptors"].__array__()
             kpts1 = feature_file[name1]["keypoints"].__array__()
             desc1 = feature_file[name1]["descriptors"].__array__()
-            
+
             # Add confidence scores (set to 1.0 for SuperPoint features)
-            if kpts0.shape[1] == 2:  # Only x, y coordinates
-                confidence0 = np.ones((kpts0.shape[0], 1))
+            if kpts0.shape[1] == 2:
+                confidence0 = np.ones((kpts0.shape[0], 1), dtype=kpts0.dtype)
                 kpts0 = np.hstack([kpts0, confidence0])
-            if kpts1.shape[1] == 2:  # Only x, y coordinates
-                confidence1 = np.ones((kpts1.shape[0], 1))
+            if kpts1.shape[1] == 2:
+                confidence1 = np.ones((kpts1.shape[0], 1), dtype=kpts1.dtype)
                 kpts1 = np.hstack([kpts1, confidence1])
-            
+
             data0 = {
                 "keypoints": torch.from_numpy(kpts0),
                 "descriptors": torch.from_numpy(desc0),
@@ -164,23 +186,28 @@ def main(
         except KeyError as e:
             logger.warning(f"Could not find features for pair {pair_name}: {e}")
             continue
-            
+
         # Match features
         try:
             pred = matcher.match_pair(data0, data1)
-            
+
+            # Defensive: ensure matches0 is always 1D or 2D array
+            matches0 = pred["matches0"]
+            if matches0.ndim == 1:
+                matches0 = matches0.reshape(-1, 1)
+
             # Save matches
             with h5py.File(str(matches), "a", libver="latest") as fd:
                 if pair_name in fd:
                     del fd[pair_name]
                 grp = fd.create_group(pair_name)
-                
-                grp.create_dataset("matches0", data=pred["matches0"])
+
+                grp.create_dataset("matches0", data=matches0)
                 grp.create_dataset("matching_scores0", data=pred["matching_scores0"])
-                
+
                 if pred["inlier_mask"] is not None:
                     grp.create_dataset("inlier_mask", data=pred["inlier_mask"])
-                    
+
         except Exception as e:
             logger.warning(f"Failed to match pair {pair_name}: {e}")
             continue
