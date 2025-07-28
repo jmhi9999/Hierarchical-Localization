@@ -11,6 +11,7 @@ from . import logger
 from .triangulation import (
     OutputCapture,
     estimation_and_geometric_verification,
+    kornia_ransac_geometric_verification,
     import_features,
     import_matches,
     parse_option_args,
@@ -153,6 +154,7 @@ def main(
     camera_mode: pycolmap.CameraMode = pycolmap.CameraMode.AUTO,
     verbose: bool = False,
     skip_geometric_verification: bool = False,
+    use_kornia_ransac: bool = False,
     min_match_score: Optional[float] = None,
     image_list: Optional[List[str]] = None,
     image_options: Optional[Dict[str, Any]] = None,
@@ -181,7 +183,12 @@ def main(
         skip_geometric_verification,
     )
     if not skip_geometric_verification:
-        estimation_and_geometric_verification(database, pairs, verbose)
+        if use_kornia_ransac:
+            kornia_ransac_geometric_verification(
+                image_ids, None, database, features, pairs, matches
+            )
+        else:
+            estimation_and_geometric_verification(database, pairs, verbose)
     reconstruction = run_reconstruction(
         sfm_dir, database, image_dir, verbose, mapper_options
     )
@@ -209,6 +216,8 @@ if __name__ == "__main__":
         choices=list(pycolmap.CameraMode.__members__.keys()),
     )
     parser.add_argument("--skip_geometric_verification", action="store_true")
+    parser.add_argument("--use_kornia_ransac", action="store_true",
+                       help="Use Kornia GPU-based RANSAC for geometric verification")
     parser.add_argument("--min_match_score", type=float)
     parser.add_argument("--verbose", action="store_true")
 
