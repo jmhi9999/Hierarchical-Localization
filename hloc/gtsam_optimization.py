@@ -337,12 +337,129 @@ class GTSAMOptimizer:
     def _scipy_bundle_adjustment(self, poses, points_3d, observations, intrinsics):
         """SciPy-based bundle adjustment fallback"""
         
-        # Simplified bundle adjustment using SciPy
         logger.warning("Using simplified SciPy bundle adjustment")
         
-        # For now, return original values (full implementation would be quite complex)
-        # This is a placeholder for demonstration
-        return poses, points_3d
+        # Convert poses to parameter vector
+        pose_ids = list(poses.keys())
+        point_ids = list(points_3d.keys())
+        
+        def pose_to_params(R, t):
+            r = Rotation.from_matrix(R)
+            rotvec = r.as_rotvec()
+            return np.concatenate([rotvec, t.flatten()])
+            
+        def params_to_pose(params):
+            rotvec = params[:3]
+            t = params[3:6].reshape(3, 1)
+            R = Rotation.from_rotvec(rotvec).as_matrix()
+            return R, t
+        
+        # Build parameter vector
+        x0 = []
+        param_poses = []
+        param_points = []
+        
+        # Pose parameters
+        for image_id in pose_ids:
+            pose_data = poses[image_id]
+            x0.extend(pose_to_params(pose_data["R"], pose_data["t"]))
+            param_poses.append(image_id)
+            
+        # Point parameters
+        for point_id in point_ids:
+            x0.extend(points_3d[point_id])
+            param_points.append(point_id)
+            
+        x0 = np.array(x0)
+        
+        def residual_function(x):
+            # Reconstruct poses and points from parameters
+            current_poses = {}
+            current_points = {}
+            
+            # Extract poses
+            for i, image_id in enumerate(param_poses):
+                start_idx = i * 6
+                params = x[start_idx:start_idx + 6]
+                R, t = params_to_pose(params)
+                current_poses[image_id] = {"R": R, "t": t}
+                
+            # Extract points
+            pose_params_size = len(param_poses) * 6
+            for i, point_id in enumerate(param_points):
+                start_idx = pose_params_size + i * 3
+                current_points[point_id] = x[start_idx:start_idx + 3]
+                
+            # Compute residuals for observations
+            residuals = []
+            
+            for obs in observations:
+                image_id = obs["image_id"]
+                point_id = obs["point_id"]
+                uv_observed = obs["uv"]
+                
+                if image_id not in current_poses or point_id not in current_points:
+                    continue
+                    
+                pose = current_poses[image_id]
+                point_3d = current_points[point_id]
+                
+                # Project 3D point
+                K = intrinsics[image_id]
+                R = pose["R"]
+                t = pose["t"]
+                
+                # Transform to camera coordinates
+                point_cam = R @ point_3d.reshape(3, 1) + t
+                
+                if point_cam[2, 0] <= 0:  # Behind camera
+                    residuals.extend([1000.0, 1000.0])  # Large penalty
+                    continue
+                    
+                # Project to image
+                point_img = K @ point_cam
+                uv_projected = point_img[:2, 0] / point_img[2, 0]
+                
+                # Residual
+                residual = uv_projected - uv_observed
+                residuals.extend(residual)
+                
+            return np.array(residuals)
+        
+        # Optimize
+        try:
+            result = least_squares(
+                residual_function,
+                x0,
+                max_nfev=self.max_iterations * len(x0),
+                ftol=self.relative_error_tol,
+                loss='huber',
+                f_scale=self.huber_threshold
+            )
+            
+            # Extract optimized poses and points
+            optimized_poses = {}
+            optimized_points_3d = {}
+            
+            # Extract poses
+            for i, image_id in enumerate(param_poses):
+                start_idx = i * 6
+                params = result.x[start_idx:start_idx + 6]
+                R, t = params_to_pose(params)
+                optimized_poses[image_id] = {"R": R, "t": t}
+                
+            # Extract points
+            pose_params_size = len(param_poses) * 6
+            for i, point_id in enumerate(param_points):
+                start_idx = pose_params_size + i * 3
+                optimized_points_3d[point_id] = result.x[start_idx:start_idx + 3]
+                
+            logger.info(f"SciPy bundle adjustment completed. Final cost: {result.cost:.6f}")
+            return optimized_poses, optimized_points_3d
+            
+        except Exception as e:
+            logger.error(f"SciPy bundle adjustment failed: {e}")
+            return poses, points_3d
 
 
 def create_pose_graph_from_matches(matches_data: Dict, 

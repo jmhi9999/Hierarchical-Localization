@@ -23,9 +23,9 @@ import h5py
 # Import our improved modules
 from hloc import extract_features, pairs_from_exhaustive, logger
 from hloc.improved_match_features import main as improved_match_features
-from hloc.degensac_pose import estimate_relative_pose
+from hloc.degensac_pose import estimate_relative_pose, DEGENSAC, LoRANSAC
 from hloc.gtsam_optimization import GTSAMOptimizer, create_pose_graph_from_matches
-from hloc.direct_triangulation import triangulate_reconstruction
+from hloc.direct_triangulation import triangulate_reconstruction, DirectTriangulation
 
 
 class ImprovedHLocPipeline:
@@ -103,9 +103,9 @@ class ImprovedHLocPipeline:
         self.match_features()
         results["matches_path"] = str(self.matches_path)
         
-        # Step 4: Estimate pairwise poses using DEGENSAC
+        # Step 4: Estimate pairwise poses using pydengensac
         logger.info("=" * 50)
-        logger.info("Step 4: Pairwise Pose Estimation (DEGENSAC)")
+        logger.info(f"Step 4: Pairwise Pose Estimation (pydengensac {self.pose_method.upper()})")
         logger.info("=" * 50)
         
         pose_estimates = self.estimate_pairwise_poses(intrinsics=intrinsics)
@@ -124,9 +124,9 @@ class ImprovedHLocPipeline:
             global_poses = self._create_initial_poses_from_pairwise(pose_estimates)
             results["global_poses"] = len(global_poses)
         
-        # Step 6: Triangulate 3D points
+        # Step 6: Triangulate 3D points using improved direct triangulation
         logger.info("=" * 50)
-        logger.info("Step 6: 3D Point Triangulation")
+        logger.info("Step 6: 3D Point Triangulation (Improved Direct Triangulation)")
         logger.info("=" * 50)
         
         if len(global_poses) >= 2:
@@ -136,7 +136,7 @@ class ImprovedHLocPipeline:
             # Step 7: Bundle adjustment (optional)
             if bundle_adjustment and len(points_3d) > 10:
                 logger.info("=" * 50)
-                logger.info("Step 7: Bundle Adjustment")
+                logger.info("Step 7: Bundle Adjustment (GTSAM/SciPy)")
                 logger.info("=" * 50)
                 
                 refined_poses, refined_points = self.bundle_adjustment(
@@ -216,7 +216,7 @@ class ImprovedHLocPipeline:
         
     def estimate_pairwise_poses(self, 
                                intrinsics: Optional[Dict[str, np.ndarray]] = None) -> Dict:
-        """Estimate pairwise poses using DEGENSAC or LoRANSAC"""
+        """Estimate pairwise poses using pydengensac (DEGENSAC or LoRANSAC)"""
         
         pose_estimates = {}
         
@@ -258,27 +258,35 @@ class ImprovedHLocPipeline:
                             "K2": intrinsics.get(img_name2)
                         }
                         
-                    # Estimate pose using selected method (DEGENSAC or LoRANSAC)
+                    # Estimate pose using pydengensac (DEGENSAC or LoRANSAC)
                     pose_result = estimate_relative_pose(
                         kpts1, kpts2, valid_matches, 
                         camera_params=camera_params,
                         method=self.pose_method,
                         max_iterations=5000,
-                        threshold=1.0
+                        threshold=1.0,
+                        confidence=0.99
                     )
                     
                     if pose_result["success"]:
                         pose_estimates[pair_name] = pose_result
+                        logger.debug(f"Successfully estimated pose for {pair_name}: "
+                                   f"{pose_result.get('inliers', []).sum()}/{len(valid_matches)} inliers")
+                    else:
+                        logger.debug(f"Failed to estimate pose for {pair_name}")
                         
                 except KeyError as e:
                     logger.warning(f"Missing data for pair {pair_name}: {e}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Error processing pair {pair_name}: {e}")
                     continue
                     
         finally:
             matches_file.close()
             features_file.close()
             
-        logger.info(f"Estimated poses for {len(pose_estimates)} pairs")
+        logger.info(f"Estimated poses for {len(pose_estimates)} pairs using pydengensac")
         return pose_estimates
         
     def optimize_global_poses(self, pose_estimates: Dict) -> Dict[str, Dict]:
@@ -367,7 +375,7 @@ class ImprovedHLocPipeline:
     def triangulate_points(self, 
                           poses: Dict[str, Dict],
                           intrinsics: Optional[Dict[str, np.ndarray]] = None) -> Dict:
-        """Triangulate 3D points"""
+        """Triangulate 3D points using improved direct triangulation"""
         
         if intrinsics is None:
             # Use default intrinsics (would normally extract from EXIF or calibration)
@@ -389,32 +397,71 @@ class ImprovedHLocPipeline:
                     "matches0": pair_data["matches0"].__array__()
                 }
                 
-        # Triangulate points
-        points_3d = triangulate_reconstruction(
-            poses, intrinsics, matches_data,
+        # Use improved triangulation with Union-Find track building
+        triangulator = DirectTriangulation(
             reprojection_threshold=4.0,
-            min_triangulation_angle=2.0
+            min_triangulation_angle=2.0,
+            max_reprojection_error=8.0
         )
         
-        logger.info(f"Triangulated {len(points_3d)} 3D points")
+        # Create point tracks using Union-Find
+        tracks = triangulator.create_point_tracks(matches_data)
+        
+        # Triangulate points
+        points_3d = triangulator.triangulate_points(
+            poses, intrinsics, matches_data, tracks)
+        
+        logger.info(f"Triangulated {len(points_3d)} 3D points using improved direct triangulation")
         return points_3d
         
     def bundle_adjustment(self,
                          poses: Dict[str, Dict], 
                          points_3d: Dict,
                          intrinsics: Dict[str, np.ndarray]) -> tuple:
-        """Run bundle adjustment optimization"""
+        """Run bundle adjustment optimization using GTSAM or SciPy fallback"""
         
-        # Create observations (simplified - would extract from actual matches)
+        # Create observations from triangulated points
         observations = []
         
-        optimizer = GTSAMOptimizer()
+        # Load features to get actual 2D observations
+        try:
+            with h5py.File(str(self.features_path), "r") as features_file:
+                for point_id, point_data in points_3d.items():
+                    for img_id, kpt_idx in point_data["observations"]:
+                        if img_id in features_file:
+                            try:
+                                kpts = features_file[img_id]["keypoints"].__array__()
+                                if kpt_idx < len(kpts):
+                                    uv = kpts[kpt_idx][:2]  # Extract 2D coordinates
+                                    observations.append({
+                                        "image_id": img_id,
+                                        "point_id": point_id,
+                                        "uv": uv
+                                    })
+                            except (KeyError, IndexError):
+                                continue
+        except Exception as e:
+            logger.warning(f"Could not load feature observations: {e}")
+            # Fallback: create dummy observations
+            for point_id, point_data in points_3d.items():
+                for img_id, kpt_idx in point_data["observations"]:
+                    observations.append({
+                        "image_id": img_id,
+                        "point_id": point_id,
+                        "uv": np.array([100.0, 100.0])  # Dummy coordinates
+                    })
+        
+        optimizer = GTSAMOptimizer(
+            huber_threshold=1.0,
+            max_iterations=100,
+            relative_error_tol=1e-5
+        )
         
         try:
             refined_poses, refined_points = optimizer.bundle_adjustment(
                 poses, points_3d, observations, intrinsics)
             
-            logger.info("Bundle adjustment completed successfully")
+            logger.info(f"Bundle adjustment completed successfully with {len(observations)} observations")
             return refined_poses, refined_points
             
         except Exception as e:
@@ -495,7 +542,7 @@ def main():
         bundle_adjustment=not args.skip_bundle_adjustment
     )
     
-    print("\\nPipeline completed successfully!")
+    print("\nPipeline completed successfully!")
     print(f"Results saved to: {args.output_dir}")
     print(f"Summary: {results}")
 

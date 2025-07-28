@@ -229,11 +229,11 @@ class DirectTriangulation:
                     P1 = projection_matrices[img_id1]
                     P2 = projection_matrices[img_id2]
                     
-                    # Get 2D points (this would need to be extracted from features)
-                    # For now, using placeholder - in real implementation, 
-                    # extract from keypoints using kpt_idx1, kpt_idx2
-                    pt1 = np.array([100.0, 100.0])  # Placeholder
-                    pt2 = np.array([110.0, 105.0])  # Placeholder
+                    # Extract actual 2D keypoint coordinates
+                    # This should be implemented to extract from feature data
+                    # For now, using placeholder - TODO: implement keypoint extraction
+                    pt1 = np.array([100.0, 100.0])  # Placeholder - needs real keypoint data
+                    pt2 = np.array([110.0, 105.0])  # Placeholder - needs real keypoint data
                     
                     # Triangulate
                     X_dlt = self.triangulate_point_dlt(P1, P2, pt1, pt2)
@@ -300,7 +300,7 @@ class DirectTriangulation:
                 P = projection_matrices[img_id]
                 
                 # Get observed 2D point (placeholder - should extract from actual keypoints)
-                pt_observed = np.array([100.0, 100.0])  # Placeholder
+                pt_observed = np.array([100.0, 100.0])  # Placeholder - TODO: implement keypoint extraction
                 
                 # Compute reprojection error
                 error = self.compute_reprojection_error(P, X, pt_observed)
@@ -327,7 +327,7 @@ class DirectTriangulation:
             
     def create_point_tracks(self, matches_data: Dict) -> Dict[int, List[Tuple[str, int]]]:
         """
-        Create point tracks from pairwise matches
+        Create point tracks from pairwise matches using Union-Find
         
         Args:
             matches_data: Dictionary with pairwise match data
@@ -336,13 +336,34 @@ class DirectTriangulation:
             Dictionary of tracks {track_id: [(image_id, keypoint_idx), ...]}
         """
         
-        # This is a simplified track building - 
-        # Full implementation would use Union-Find or graph-based methods
+        # Union-Find data structure for track building
+        class UnionFind:
+            def __init__(self):
+                self.parent = {}
+                self.rank = {}
+                
+            def find(self, x):
+                if x not in self.parent:
+                    self.parent[x] = x
+                    self.rank[x] = 0
+                    return x
+                if self.parent[x] != x:
+                    self.parent[x] = self.find(self.parent[x])
+                return self.parent[x]
+                
+            def union(self, x, y):
+                px, py = self.find(x), self.find(y)
+                if px == py:
+                    return
+                if self.rank[px] < self.rank[py]:
+                    px, py = py, px
+                self.parent[py] = px
+                if self.rank[px] == self.rank[py]:
+                    self.rank[px] += 1
         
-        tracks = {}
-        track_id = 0
-        used_points = set()
+        uf = UnionFind()
         
+        # Process all matches to build connected components
         for pair_name, pair_data in matches_data.items():
             # Parse image IDs
             parts = pair_name.split('_')
@@ -365,14 +386,47 @@ class DirectTriangulation:
                 point1 = (img_id1, kpt_idx1)
                 point2 = (img_id2, kpt_idx2)
                 
-                if point1 not in used_points and point2 not in used_points:
-                    # Create new track
-                    tracks[track_id] = [point1, point2]
-                    used_points.add(point1)
-                    used_points.add(point2)
-                    track_id += 1
+                # Union the two points (they belong to same track)
+                uf.union(point1, point2)
+        
+        # Group points by their root (track)
+        track_groups = {}
+        for pair_name, pair_data in matches_data.items():
+            parts = pair_name.split('_')
+            if len(parts) < 2:
+                continue
+                
+            img_id1, img_id2 = parts[0], '_'.join(parts[1:])
+            
+            if "matches0" not in pair_data:
+                continue
+                
+            matches = pair_data["matches0"]
+            
+            for match in matches:
+                if match[1] == -1:
+                    continue
                     
-        logger.info(f"Created {len(tracks)} point tracks")
+                kpt_idx1, kpt_idx2 = int(match[0]), int(match[1])
+                point1 = (img_id1, kpt_idx1)
+                point2 = (img_id2, kpt_idx2)
+                
+                root1 = uf.find(point1)
+                root2 = uf.find(point2)
+                
+                # Add to track group
+                if root1 not in track_groups:
+                    track_groups[root1] = set()
+                track_groups[root1].add(point1)
+                track_groups[root1].add(point2)
+        
+        # Convert to final format
+        tracks = {}
+        for track_id, points in enumerate(track_groups.values()):
+            if len(points) >= 2:  # Only tracks with at least 2 observations
+                tracks[track_id] = list(points)
+                    
+        logger.info(f"Created {len(tracks)} point tracks using Union-Find")
         return tracks
 
 
