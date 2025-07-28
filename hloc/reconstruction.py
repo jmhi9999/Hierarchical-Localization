@@ -11,7 +11,7 @@ from . import logger
 from .triangulation import (
     OutputCapture,
     estimation_and_geometric_verification,
-    kornia_ransac_geometric_verification,
+    kornia_ransac_verification_no_reference,
     import_features,
     import_matches,
     parse_option_args,
@@ -184,8 +184,8 @@ def main(
     )
     if not skip_geometric_verification:
         if use_kornia_ransac:
-            kornia_ransac_geometric_verification(
-                image_ids, None, database, features, pairs, matches
+            kornia_ransac_verification_no_reference(
+                image_ids, database, features, pairs, matches
             )
         else:
             estimation_and_geometric_verification(database, pairs, verbose)
