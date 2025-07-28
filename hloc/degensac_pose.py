@@ -1,7 +1,20 @@
 import numpy as np
 import cv2
 from typing import Dict, Tuple, Optional, List
-import pydengensac
+
+# Try to import pydengensac, fallback to pydegensac
+try:
+    import pydengensac
+    DENGENSAC_AVAILABLE = True
+except ImportError:
+    try:
+        import pydegensac
+        DENGENSAC_AVAILABLE = True
+        # Create alias for compatibility
+        pydengensac = pydegensac
+    except ImportError:
+        DENGENSAC_AVAILABLE = False
+        print("Warning: Neither pydengensac nor pydegensac found. Using fallback implementation.")
 
 from . import logger
 
@@ -27,7 +40,7 @@ class DEGENSAC:
                      K1: Optional[np.ndarray] = None,
                      K2: Optional[np.ndarray] = None) -> Dict:
         """
-        Estimate relative pose using pydengensac
+        Estimate relative pose using pydengensac/pydegensac
         
         Args:
             keypoints1, keypoints2: [N, 2] keypoint coordinates
@@ -46,7 +59,11 @@ class DEGENSAC:
             logger.warning(f"Insufficient matches: {len(pts1)} < {self.min_sample_size}")
             return {"success": False}
             
-        # Use pydengensac for fundamental matrix estimation
+        # Use pydengensac/pydegensac for fundamental matrix estimation
+        if not DENGENSAC_AVAILABLE:
+            logger.warning("DEGENSAC not available, using fallback implementation")
+            return self._fallback_estimate_pose(pts1, pts2, K1, K2)
+            
         try:
             F, inliers = pydengensac.findFundamentalMatrix(
                 pts1, pts2,
@@ -56,7 +73,7 @@ class DEGENSAC:
             )
             
             if F is None:
-                logger.warning("pydengensac failed to find valid fundamental matrix")
+                logger.warning("pydengensac/pydegensac failed to find valid fundamental matrix")
                 return {"success": False}
                 
             # Convert inliers to boolean mask
@@ -83,13 +100,88 @@ class DEGENSAC:
                     "pose_inliers": mask.ravel().astype(bool)
                 })
                 
-            logger.info(f"pydengensac: {len(inliers)}/{len(pts1)} inliers "
+            logger.info(f"pydengensac/pydegensac: {len(inliers)}/{len(pts1)} inliers "
                        f"({100*len(inliers)/len(pts1):.1f}%)")
             
             return pose_result
             
         except Exception as e:
-            logger.error(f"pydengensac error: {e}")
+            logger.error(f"pydengensac/pydegensac error: {e}")
+            return self._fallback_estimate_pose(pts1, pts2, K1, K2)
+            
+    def _fallback_estimate_pose(self, 
+                               pts1: np.ndarray, 
+                               pts2: np.ndarray,
+                               K1: Optional[np.ndarray] = None,
+                               K2: Optional[np.ndarray] = None) -> Dict:
+        """
+        Fallback pose estimation using OpenCV's RANSAC
+        
+        Args:
+            pts1, pts2: [N, 2] point correspondences
+            K1, K2: [3, 3] camera intrinsic matrices
+            
+        Returns:
+            Dictionary with pose estimation results
+        """
+        
+        if len(pts1) < 8:
+            return {"success": False}
+            
+        try:
+            if K1 is not None and K2 is not None:
+                # Use essential matrix method
+                E, inliers = cv2.findEssentialMat(
+                    pts1, pts2, K1, 
+                    method=cv2.RANSAC,
+                    prob=0.999,
+                    threshold=self.threshold
+                )
+                
+                if E is None:
+                    return {"success": False}
+                    
+                # Decompose essential matrix
+                _, R, t, mask = cv2.recoverPose(E, pts1, pts2, K1)
+                
+                # Convert essential matrix to fundamental matrix
+                F = np.linalg.inv(K2).T @ E @ np.linalg.inv(K1)
+                
+            else:
+                # Use fundamental matrix method
+                F, inliers = cv2.findFundamentalMat(
+                    pts1, pts2,
+                    method=cv2.RANSAC,
+                    ransacReprojThreshold=self.threshold,
+                    confidence=0.99,
+                    maxIters=self.max_iterations
+                )
+                
+                if F is None:
+                    return {"success": False}
+                    
+                R = t = mask = None
+                
+            # Convert inliers to boolean mask
+            inlier_mask = np.zeros(len(pts1), dtype=bool)
+            inlier_mask[inliers.ravel()] = True
+            
+            pose_result = {"success": True, "F": F, "inliers": inlier_mask}
+            
+            if R is not None and t is not None:
+                pose_result.update({
+                    "R": R,
+                    "t": t,
+                    "pose_inliers": mask.ravel().astype(bool)
+                })
+                
+            logger.info(f"OpenCV fallback: {inlier_mask.sum()}/{len(pts1)} inliers "
+                       f"({100*inlier_mask.sum()/len(pts1):.1f}%)")
+            
+            return pose_result
+            
+        except Exception as e:
+            logger.error(f"Fallback pose estimation failed: {e}")
             return {"success": False}
 
 
@@ -114,7 +206,7 @@ class LoRANSAC:
                      K1: Optional[np.ndarray] = None,
                      K2: Optional[np.ndarray] = None) -> Dict:
         """
-        Estimate relative pose using pydengensac LoRANSAC
+        Estimate relative pose using pydengensac/pydegensac LoRANSAC
         
         Args:
             keypoints1, keypoints2: [N, 2] keypoint coordinates
@@ -133,7 +225,11 @@ class LoRANSAC:
             logger.warning(f"Insufficient matches: {len(pts1)} < {self.min_sample_size}")
             return {"success": False}
             
-        # Use pydengensac for fundamental matrix estimation with LoRANSAC
+        # Use pydengensac/pydegensac for fundamental matrix estimation with LoRANSAC
+        if not DENGENSAC_AVAILABLE:
+            logger.warning("LoRANSAC not available, using fallback implementation")
+            return self._fallback_estimate_pose(pts1, pts2, K1, K2)
+            
         try:
             F, inliers = pydengensac.findFundamentalMatrix(
                 pts1, pts2,
@@ -144,7 +240,7 @@ class LoRANSAC:
             )
             
             if F is None:
-                logger.warning("pydengensac LoRANSAC failed to find valid fundamental matrix")
+                logger.warning("pydengensac/pydegensac LoRANSAC failed to find valid fundamental matrix")
                 return {"success": False}
                 
             # Convert inliers to boolean mask
@@ -171,13 +267,88 @@ class LoRANSAC:
                     "pose_inliers": mask.ravel().astype(bool)
                 })
                 
-            logger.info(f"pydengensac LoRANSAC: {len(inliers)}/{len(pts1)} inliers "
+            logger.info(f"pydengensac/pydegensac LoRANSAC: {len(inliers)}/{len(pts1)} inliers "
                        f"({100*len(inliers)/len(pts1):.1f}%)")
             
             return pose_result
             
         except Exception as e:
-            logger.error(f"pydengensac LoRANSAC error: {e}")
+            logger.error(f"pydengensac/pydegensac LoRANSAC error: {e}")
+            return self._fallback_estimate_pose(pts1, pts2, K1, K2)
+            
+    def _fallback_estimate_pose(self, 
+                               pts1: np.ndarray, 
+                               pts2: np.ndarray,
+                               K1: Optional[np.ndarray] = None,
+                               K2: Optional[np.ndarray] = None) -> Dict:
+        """
+        Fallback pose estimation using OpenCV's RANSAC (for LoRANSAC)
+        
+        Args:
+            pts1, pts2: [N, 2] point correspondences
+            K1, K2: [3, 3] camera intrinsic matrices
+            
+        Returns:
+            Dictionary with pose estimation results
+        """
+        
+        if len(pts1) < 8:
+            return {"success": False}
+            
+        try:
+            if K1 is not None and K2 is not None:
+                # Use essential matrix method
+                E, inliers = cv2.findEssentialMat(
+                    pts1, pts2, K1, 
+                    method=cv2.RANSAC,
+                    prob=0.999,
+                    threshold=self.threshold
+                )
+                
+                if E is None:
+                    return {"success": False}
+                    
+                # Decompose essential matrix
+                _, R, t, mask = cv2.recoverPose(E, pts1, pts2, K1)
+                
+                # Convert essential matrix to fundamental matrix
+                F = np.linalg.inv(K2).T @ E @ np.linalg.inv(K1)
+                
+            else:
+                # Use fundamental matrix method
+                F, inliers = cv2.findFundamentalMat(
+                    pts1, pts2,
+                    method=cv2.RANSAC,
+                    ransacReprojThreshold=self.threshold,
+                    confidence=0.99,
+                    maxIters=self.max_iterations
+                )
+                
+                if F is None:
+                    return {"success": False}
+                    
+                R = t = mask = None
+                
+            # Convert inliers to boolean mask
+            inlier_mask = np.zeros(len(pts1), dtype=bool)
+            inlier_mask[inliers.ravel()] = True
+            
+            pose_result = {"success": True, "F": F, "inliers": inlier_mask}
+            
+            if R is not None and t is not None:
+                pose_result.update({
+                    "R": R,
+                    "t": t,
+                    "pose_inliers": mask.ravel().astype(bool)
+                })
+                
+            logger.info(f"OpenCV LoRANSAC fallback: {inlier_mask.sum()}/{len(pts1)} inliers "
+                       f"({100*inlier_mask.sum()/len(pts1):.1f}%)")
+            
+            return pose_result
+            
+        except Exception as e:
+            logger.error(f"LoRANSAC fallback pose estimation failed: {e}")
             return {"success": False}
 
 
