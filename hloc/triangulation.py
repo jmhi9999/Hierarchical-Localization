@@ -129,12 +129,19 @@ def kornia_ransac_verification_no_reference(
 ):
     """Geometric verification using Kornia GPU-based RANSAC without reference model."""
     logger.info(f"Performing Kornia GPU-based geometric verification (no reference) on {device}...")
-
     pairs = parse_retrieval(pairs_path)
     db = COLMAPDatabase.connect(database_path)
-
     inlier_ratios = []
     matched = set()
+    
+    # Initialize Kornia RANSAC for fundamental matrix estimation
+    ransac_solver = K.geometry.ransac.RANSAC(
+        model_type="fundamental",
+        inl_th=max_error,
+        batch_size=2048,
+        max_iter=max_iter // 2048,  
+        confidence=ransac_confidence
+    ).to(device)
     
     for name0 in tqdm(pairs):
         id0 = image_ids[name0]
@@ -144,31 +151,27 @@ def kornia_ransac_verification_no_reference(
             id1 = image_ids[name1]
             kps1 = get_keypoints(features_path, name1)
             matches = get_matches(matches_path, name0, name1)[0]
-
+            
             if len({(id0, id1), (id1, id0)} & matched) > 0:
                 continue
             matched |= {(id0, id1), (id1, id0)}
-
+            
             if matches.shape[0] == 0:
                 db.add_two_view_geometry(id0, id1, matches)
                 continue
-
+                
             # Use Kornia RANSAC for fundamental matrix estimation
             if matches.shape[0] >= 8:  # Need at least 8 points for fundamental matrix
                 try:
-                    # Convert to torch tensors and add batch dimension
+                    # Convert to torch tensors with batch dimension
                     pts0 = torch.from_numpy(kps0[matches[:, 0]]).float().to(device).unsqueeze(0)
                     pts1 = torch.from_numpy(kps1[matches[:, 1]]).float().to(device).unsqueeze(0)
                     
-                    # Estimate fundamental matrix using Kornia RANSAC
-                    F, inliers = K.geometry.ransac.find_fundamental(
-                        pts0, pts1,
-                        threshold=max_error,
-                        confidence=ransac_confidence,
-                        max_iter=max_iter
-                    )
+                    # Apply RANSAC to find fundamental matrix and inliers
+                    # Returns (model, inliers) where model is fundamental matrix
+                    F, inliers = ransac_solver(pts0, pts1)
                     
-                    # Get inlier mask
+                    # Get inlier mask - inliers is a boolean tensor
                     inlier_mask = inliers.squeeze(0).cpu().numpy().astype(bool)
                     valid_matches = matches[inlier_mask]
                     
@@ -178,10 +181,10 @@ def kornia_ransac_verification_no_reference(
             else:
                 # Not enough points for fundamental matrix, use all matches
                 valid_matches = matches
-
+                
             db.add_two_view_geometry(id0, id1, valid_matches)
             inlier_ratios.append(len(valid_matches) / len(matches) if len(matches) > 0 else 0)
-
+    
     logger.info(
         "mean/med/min/max valid matches %.2f/%.2f/%.2f/%.2f%%.",
         np.mean(inlier_ratios) * 100,
@@ -189,9 +192,10 @@ def kornia_ransac_verification_no_reference(
         np.min(inlier_ratios) * 100,
         np.max(inlier_ratios) * 100,
     )
-
     db.commit()
     db.close()
+
+
 
 
 def kornia_ransac_geometric_verification(
