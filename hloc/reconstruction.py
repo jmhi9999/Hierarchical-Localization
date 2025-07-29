@@ -12,6 +12,7 @@ from .triangulation import (
     OutputCapture,
     estimation_and_geometric_verification,
     kornia_ransac_verification_no_reference,
+    magsac_verification_no_reference,
     import_features,
     import_matches,
     parse_option_args,
@@ -155,6 +156,7 @@ def main(
     verbose: bool = False,
     skip_geometric_verification: bool = False,
     use_kornia_ransac: bool = False,
+    use_magsac: bool = False,
     min_match_score: Optional[float] = None,
     image_list: Optional[List[str]] = None,
     image_options: Optional[Dict[str, Any]] = None,
@@ -185,6 +187,10 @@ def main(
     if not skip_geometric_verification:
         if use_kornia_ransac:
             kornia_ransac_verification_no_reference(
+                image_ids, database, features, pairs, matches
+            )
+        elif use_magsac:
+            magsac_verification_no_reference(
                 image_ids, database, features, pairs, matches
             )
         else:
@@ -218,6 +224,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip_geometric_verification", action="store_true")
     parser.add_argument("--use_kornia_ransac", action="store_true",
                        help="Use Kornia GPU-based RANSAC for geometric verification")
+    parser.add_argument("--use_magsac", action="store_true",
+                       help="Use OpenCV MAGSAC++ for geometric verification")
     parser.add_argument("--min_match_score", type=float)
     parser.add_argument("--verbose", action="store_true")
 
