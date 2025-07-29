@@ -125,7 +125,7 @@ def magsac_verification_no_reference(
     matches_path: Path,
     max_error: float = 4.0,
     ransac_confidence: float = 0.99,
-    max_iter: int = 10000,
+    max_iter: int = 1000,
 ):
     """Geometric verification using OpenCV MAGSAC++ for fundamental matrix estimation."""
     logger.info("Performing MAGSAC++ geometric verification (no reference)...")
@@ -158,11 +158,12 @@ def magsac_verification_no_reference(
                     pts1 = kps1[matches[:, 1]].astype(np.float32)
                     
                     # Apply MAGSAC++ to find fundamental matrix and inliers
+                    # Use lower confidence for speed vs RANSAC's 0.99
                     F, inlier_mask = cv2.findFundamentalMat(
                         pts0, pts1,
                         method=cv2.USAC_MAGSAC,
                         ransacReprojThreshold=max_error,
-                        confidence=ransac_confidence,
+                        confidence=0.95,  # Lower than RANSAC for speed
                         maxIters=max_iter
                     )
                     
@@ -201,7 +202,7 @@ def kornia_ransac_verification_no_reference(
     matches_path: Path,
     max_error: float = 4.0,
     ransac_confidence: float = 0.99,
-    max_iter: int = 10000,
+    max_iter: int = 2000,
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
 ):
     """Geometric verification using Kornia GPU-based RANSAC without reference model."""
@@ -210,15 +211,6 @@ def kornia_ransac_verification_no_reference(
     db = COLMAPDatabase.connect(database_path)
     inlier_ratios = []
     matched = set()
-    
-    # Initialize Kornia RANSAC for fundamental matrix estimation
-    ransac_solver = K.geometry.ransac.RANSAC(
-        model_type="fundamental",
-        inl_th=max_error,
-        batch_size=2048,
-        max_iter=max_iter // 2048,  
-        confidence=ransac_confidence
-    ).to(device)
     
     for name0 in tqdm(pairs):
         id0 = image_ids[name0]
@@ -240,17 +232,31 @@ def kornia_ransac_verification_no_reference(
             # Use Kornia RANSAC for fundamental matrix estimation
             if matches.shape[0] >= 8:  # Need at least 8 points for fundamental matrix
                 try:
-                    # Convert to torch tensors with batch dimension
-                    pts0 = torch.from_numpy(kps0[matches[:, 0]]).float().to(device).unsqueeze(0)
-                    pts1 = torch.from_numpy(kps1[matches[:, 1]]).float().to(device).unsqueeze(0)
+                    # Extract matched keypoints
+                    pts0 = kps0[matches[:, 0]]
+                    pts1 = kps1[matches[:, 1]]
                     
-                    # Apply RANSAC to find fundamental matrix and inliers
-                    # Returns (model, inliers) where model is fundamental matrix
-                    F, inliers = ransac_solver(pts0, pts1)
+                    # Convert to torch tensors with proper shape for Kornia
+                    # Use non_blocking=True for faster GPU transfer
+                    pts0_tensor = torch.from_numpy(pts0).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
+                    pts1_tensor = torch.from_numpy(pts1).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
+                    
+                    # Use Kornia's find_fundamental function directly
+                    F, inliers = K.geometry.ransac.find_fundamental(
+                        pts0_tensor, pts1_tensor,
+                        threshold=max_error,
+                        confidence=ransac_confidence,
+                        max_iter=max_iter
+                    )
                     
                     # Get inlier mask - inliers is a boolean tensor
                     inlier_mask = inliers.squeeze(0).cpu().numpy().astype(bool)
                     valid_matches = matches[inlier_mask]
+                    
+                    # Check if we have enough inliers
+                    if len(valid_matches) < 8:
+                        logger.debug(f"Kornia RANSAC: insufficient inliers for {name0}-{name1}: {len(valid_matches)} < 8")
+                        valid_matches = matches  # Use all matches as fallback
                     
                 except Exception as e:
                     logger.debug(f"Kornia RANSAC failed for {name0}-{name1}: {e}, using all matches")
@@ -284,7 +290,7 @@ def magsac_geometric_verification(
     matches_path: Path,
     max_error: float = 4.0,
     ransac_confidence: float = 0.99,
-    max_iter: int = 10000,
+    max_iter: int = 1000,
 ):
     """Geometric verification using OpenCV MAGSAC++ for fundamental matrix estimation."""
     logger.info("Performing MAGSAC++ geometric verification...")
@@ -334,11 +340,12 @@ def magsac_geometric_verification(
                     pts1 = kps1[matches[:, 1]].astype(np.float32)
                     
                     # Apply MAGSAC++ to find fundamental matrix and inliers
+                    # Use lower confidence for speed vs RANSAC's 0.99
                     F, inlier_mask = cv2.findFundamentalMat(
                         pts0, pts1,
                         method=cv2.USAC_MAGSAC,
                         ransacReprojThreshold=max_error,
-                        confidence=ransac_confidence,
+                        confidence=0.95,  # Lower than RANSAC for speed
                         maxIters=max_iter
                     )
                     
@@ -396,7 +403,7 @@ def kornia_ransac_geometric_verification(
     matches_path: Path,
     max_error: float = 4.0,
     ransac_confidence: float = 0.99,
-    max_iter: int = 10000,
+    max_iter: int = 2000,
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
 ):
     """Geometric verification using Kornia GPU-based RANSAC for fundamental matrix estimation."""
@@ -443,29 +450,31 @@ def kornia_ransac_geometric_verification(
             # Use Kornia RANSAC for fundamental matrix estimation
             if matches.shape[0] >= 8:  # Need at least 8 points for fundamental matrix
                 try:
-                    # Convert to torch tensors
-                    pts0 = torch.from_numpy(kps0[matches[:, 0]]).float().to(device)
-                    pts1 = torch.from_numpy(kps1[matches[:, 1]]).float().to(device)
+                    # Extract matched keypoints
+                    pts0 = kps0[matches[:, 0]]
+                    pts1 = kps1[matches[:, 1]]
                     
-                    # Add homogeneous coordinates
-                    pts0_h = torch.cat([pts0, torch.ones(pts0.shape[0], 1, device=device)], dim=1)
-                    pts1_h = torch.cat([pts1, torch.ones(pts1.shape[0], 1, device=device)], dim=1)
+                    # Convert to torch tensors with proper shape for Kornia
+                    # Use non_blocking=True for faster GPU transfer
+                    pts0_tensor = torch.from_numpy(pts0).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
+                    pts1_tensor = torch.from_numpy(pts1).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
                     
-                    # Estimate fundamental matrix using Kornia RANSAC
+                    # Use Kornia's find_fundamental function directly
                     F, inliers = K.geometry.ransac.find_fundamental(
-                        pts0_h.unsqueeze(0), pts1_h.unsqueeze(0),
+                        pts0_tensor, pts1_tensor,
                         threshold=max_error,
                         confidence=ransac_confidence,
                         max_iter=max_iter
                     )
                     
-                    # Get inlier mask
+                    # Get inlier mask - inliers is a boolean tensor
                     inlier_mask = inliers.squeeze(0).cpu().numpy().astype(bool)
                     valid_matches = matches[inlier_mask]
                     
-                    # Fallback to epipolar error computation if Kornia RANSAC fails
-                    if valid_matches.shape[0] == 0:
-                        raise RuntimeError("No inliers found")
+                    # Check if we have enough inliers
+                    if len(valid_matches) < 8:
+                        logger.debug(f"Kornia RANSAC: insufficient inliers for {name0}-{name1}: {len(valid_matches)} < 8")
+                        raise RuntimeError("Insufficient inliers")
                         
                 except Exception as e:
                     logger.debug(f"Kornia RANSAC failed for {name0}-{name1}: {e}, falling back to epipolar error")
