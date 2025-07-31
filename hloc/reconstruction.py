@@ -15,7 +15,6 @@ from .triangulation import (
     import_matches,
     parse_option_args,
 )
-from .robust_mapper_options import get_robust_mapper_options
 from .utils.database import COLMAPDatabase
 
 
@@ -158,7 +157,7 @@ def main(
     image_list: Optional[List[str]] = None,
     image_options: Optional[Dict[str, Any]] = None,
     mapper_options: Optional[Dict[str, Any]] = None,
-    ransac_option: str = "ransac",
+    confidence: float = 0.9999,
 ) -> pycolmap.Reconstruction:
     assert features.exists(), features
     assert pairs.exists(), pairs
@@ -183,33 +182,7 @@ def main(
         skip_geometric_verification,
     )
     if not skip_geometric_verification:
-        # Provide helpful information about RANSAC dependencies
-        if ransac_option == "magsac":
-            logger.info("Using MAGSAC - requires 'pip install pymagsac'")
-            logger.info("MAGSAC parameters optimized for better reconstruction coverage")
-        elif ransac_option == "kornia_ransac":
-            logger.info("Using Kornia RANSAC - requires 'pip install kornia torch'")
-        elif ransac_option == "loransac":
-            logger.info("Using LORANSAC - using COLMAP's built-in implementation")
-        elif ransac_option == "ransac":
-            logger.info("Using standard RANSAC - using COLMAP's default implementation")
-        
-        try:
-            estimation_and_geometric_verification(database, pairs, verbose, ransac_option)
-        except ImportError as e:
-            logger.error(f"Failed to use {ransac_option}: {e}")
-            logger.info("Falling back to standard RANSAC...")
-            estimation_and_geometric_verification(database, pairs, verbose, "ransac")
-    # Get optimized mapper options based on RANSAC method
-    if mapper_options is None:
-        mapper_options = {}
-    
-    # Merge with robust options optimized for the RANSAC method
-    robust_options = get_robust_mapper_options(ransac_option)
-    mapper_options = {**robust_options, **mapper_options}  # User options override
-    
-    logger.info(f"Using optimized mapper options for {ransac_option}: {list(robust_options.keys())}")
-    
+        estimation_and_geometric_verification(database, pairs, verbose, confidence)
     reconstruction = run_reconstruction(
         sfm_dir, database, image_dir, verbose, mapper_options
     )
@@ -239,17 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_geometric_verification", action="store_true")
     parser.add_argument("--min_match_score", type=float)
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument(
-        "--ransac_option",
-        type=str,
-        default="ransac",
-        choices=["ransac", "magsac", "loransac", "kornia_ransac"],
-        help="RANSAC algorithm to use for geometric verification. "
-             "ransac: Standard RANSAC (default, fast). "
-             "magsac: MAGSAC (requires pymagsac). "
-             "loransac: LORANSAC (slower but more accurate). "
-             "kornia_ransac: Kornia RANSAC (requires kornia, torch, GPU recommended)"
-    )
+    parser.add_argument("--confidence", type=float, default=0.9999, help="RANSAC confidence threshold")
 
     parser.add_argument(
         "--image_options",
