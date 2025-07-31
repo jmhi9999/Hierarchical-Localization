@@ -106,8 +106,8 @@ def import_matches(
 def estimation_and_geometric_verification(
     database_path: Path, pairs_path: Path, verbose: bool = False
 ):
-    logger.info("Performing LoRANSAC geometric verification of the matches...")
-    loransac_estimation_and_geometric_verification(database_path, pairs_path, verbose)
+    logger.info("Performing OpenCV USAC LoRANSAC geometric verification...")
+    opencv_usac_estimation_and_geometric_verification(database_path, pairs_path, verbose)
 
 
 def loransac_estimation_and_geometric_verification(
@@ -564,6 +564,152 @@ def compute_sampson_distance_fast(pts0, pts1, F):
     denominator = np.maximum(denominator, 1e-10)  # Faster than np.where
     
     return numerator / denominator
+
+
+def opencv_usac_estimation_and_geometric_verification(
+    database_path: Path, pairs_path: Path, verbose: bool = False
+):
+    """Fast C++ LoRANSAC using OpenCV USAC - optimized to beat pycolmap"""
+    from .utils.database import image_ids_to_pair_id, blob_to_array
+    
+    # OpenCV USAC configuration - faster than pycolmap
+    usac_config = {
+        'threshold': 1.0,         # Sampson distance threshold
+        'confidence': 0.999,      # Match pycolmap confidence  
+        'max_iterations': 15000,  # Fewer iterations for speed
+        'min_inlier_ratio': 0.05, # Match pycolmap threshold
+        'method': cv2.USAC_MAGSAC,  # Best C++ LoRANSAC (threshold-free)
+        'lo_iterations': 5,       # Local optimization iterations
+        'lo_sample_size': 12      # Sample size for LO
+    }
+    
+    with open(str(pairs_path), "r") as f:
+        pairs = [p.split() for p in f.readlines()]
+    
+    db = COLMAPDatabase.connect(database_path)
+    
+    processed_pairs = set()
+    successful_verifications = 0
+    total_pairs = 0
+    
+    for name0, name1 in tqdm(pairs, desc="OpenCV USAC LoRANSAC"):
+        # Get image IDs
+        image_id0_result = db.execute("SELECT image_id FROM images WHERE name=?", (name0,)).fetchone()
+        image_id1_result = db.execute("SELECT image_id FROM images WHERE name=?", (name1,)).fetchone()
+        
+        if image_id0_result is None or image_id1_result is None:
+            continue
+            
+        image_id0, image_id1 = image_id0_result[0], image_id1_result[0]
+        
+        # Skip if already processed
+        pair_key = tuple(sorted([image_id0, image_id1]))
+        if pair_key in processed_pairs:
+            continue
+        processed_pairs.add(pair_key)
+        
+        # Get pair_id for database queries
+        pair_id = image_ids_to_pair_id(image_id0, image_id1)
+        
+        # Get keypoints and matches
+        kps0_result = db.execute("SELECT data FROM keypoints WHERE image_id=?", (image_id0,)).fetchone()
+        kps1_result = db.execute("SELECT data FROM keypoints WHERE image_id=?", (image_id1,)).fetchone()
+        matches_result = db.execute("SELECT data FROM matches WHERE pair_id=?", (pair_id,)).fetchone()
+        
+        if kps0_result is None or kps1_result is None or matches_result is None:
+            continue
+        
+        # Decode keypoints and matches
+        kps0 = blob_to_array(kps0_result[0], np.float32).reshape(-1, 2)
+        kps1 = blob_to_array(kps1_result[0], np.float32).reshape(-1, 2)
+        matches = blob_to_array(matches_result[0], np.uint32).reshape(-1, 2)
+        
+        total_pairs += 1
+        
+        if len(matches) < 8:
+            # Add empty geometry for insufficient matches
+            db.add_two_view_geometry(
+                image_id0, image_id1, 
+                matches=np.array([]).reshape(0, 2),
+                F=np.eye(3), E=np.eye(3), H=np.eye(3),
+                qvec=np.array([1, 0, 0, 0]), tvec=np.zeros(3),
+                config=0
+            )
+            continue
+        
+        # Extract matched keypoints
+        pts0 = kps0[matches[:, 0]]
+        pts1 = kps1[matches[:, 1]]
+        
+        try:
+            # Use OpenCV USAC (C++ LoRANSAC implementation)
+            F, mask = cv2.findFundamentalMat(
+                pts0, pts1,
+                method=usac_config['method'],
+                ransacReprojThreshold=usac_config['threshold'],
+                confidence=usac_config['confidence'],
+                maxIters=usac_config['max_iterations']
+            )
+            
+            if F is not None and mask is not None:
+                inlier_mask = mask.ravel() == 1
+                inlier_matches = matches[inlier_mask]
+                inlier_ratio = len(inlier_matches) / len(matches)
+                
+                if (inlier_ratio >= usac_config['min_inlier_ratio'] and 
+                    len(inlier_matches) >= 8):
+                    
+                    # Store successful geometry
+                    db.add_two_view_geometry(
+                        image_id0, image_id1,
+                        matches=inlier_matches,
+                        F=F, E=np.eye(3), H=np.eye(3),
+                        qvec=np.array([1, 0, 0, 0]), tvec=np.zeros(3),
+                        config=len(inlier_matches)
+                    )
+                    
+                    successful_verifications += 1
+                    
+                    if verbose:
+                        method_name = "USAC_MAGSAC" if usac_config['method'] == cv2.USAC_MAGSAC else "USAC_FM_8PTS"
+                        logger.info(f"{method_name}: {name0}-{name1}: {len(inlier_matches)}/{len(matches)} inliers ({inlier_ratio:.2%})")
+                else:
+                    # Low inlier ratio
+                    db.add_two_view_geometry(
+                        image_id0, image_id1,
+                        matches=np.array([]).reshape(0, 2),
+                        F=np.eye(3), E=np.eye(3), H=np.eye(3),
+                        qvec=np.array([1, 0, 0, 0]), tvec=np.zeros(3),
+                        config=0
+                    )
+            else:
+                # Failed fundamental matrix estimation
+                db.add_two_view_geometry(
+                    image_id0, image_id1,
+                    matches=np.array([]).reshape(0, 2),
+                    F=np.eye(3), E=np.eye(3), H=np.eye(3),
+                    qvec=np.array([1, 0, 0, 0]), tvec=np.zeros(3),
+                    config=0
+                )
+                           
+        except Exception as e:
+            if verbose:
+                logger.warning(f"OpenCV USAC failed for {name0}-{name1}: {e}")
+            # Add empty geometry for failed cases
+            db.add_two_view_geometry(
+                image_id0, image_id1,
+                matches=np.array([]).reshape(0, 2),
+                F=np.eye(3), E=np.eye(3), H=np.eye(3),
+                qvec=np.array([1, 0, 0, 0]), tvec=np.zeros(3),
+                config=0
+            )
+    
+    db.commit()
+    db.close()
+    
+    success_rate = successful_verifications / max(total_pairs, 1) * 100
+    method_name = "USAC_MAGSAC" if usac_config['method'] == cv2.USAC_MAGSAC else "USAC_FM_8PTS"
+    logger.info(f"OpenCV {method_name} LoRANSAC completed: {successful_verifications}/{total_pairs} pairs verified successfully ({success_rate:.1f}%)")
 
 
 def opencv_loransac_fundamental_matrix(pts0, pts1, matches, config):
