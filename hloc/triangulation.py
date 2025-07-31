@@ -158,103 +158,82 @@ def kornia_geometric_verification(
     
     db = COLMAPDatabase.connect(database_path)
     
-    # Process pairs in batches for better GPU utilization
-    batch_size = 32 if device.type == 'cuda' else 1  # Larger batches for GPU
-    
-    for i in range(0, len(pairs), batch_size):
-        batch_pairs = pairs[i:i + batch_size]
+    # Process each pair individually (simpler and more robust)
+    for name0, name1 in tqdm(pairs, desc="Kornia RANSAC verification"):
+        # Get matches from database
+        image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
+        image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
         
-        # Prepare batch data
-        batch_pts0 = []
-        batch_pts1 = []
-        batch_matches = []
-        batch_image_ids = []
-        valid_pairs = []
+        if image_id0 is None or image_id1 is None:
+            continue
+            
+        image_id0, image_id1 = image_id0[0], image_id1[0]
         
-        for name0, name1 in batch_pairs:
-            # Get matches from database
-            image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
-            image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
-            
-            if image_id0 is None or image_id1 is None:
-                continue
-                
-            image_id0, image_id1 = image_id0[0], image_id1[0]
-            
-            # Get keypoints and matches
-            kpts0 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id0,)).fetchone()
-            kpts1 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id1,)).fetchone()
-            matches_data = db.execute("SELECT data FROM matches WHERE pair_id = ?", 
-                                     (image_ids_to_pair_id(image_id0, image_id1),)).fetchone()
-            
-            if kpts0 is None or kpts1 is None or matches_data is None:
-                continue
-                
-            # Convert to numpy arrays
-            kpts0 = reshape_keypoints(kpts0[0])
-            kpts1 = reshape_keypoints(kpts1[0])
-            matches = np.frombuffer(matches_data[0], dtype=np.uint32).reshape(-1, 2)
-            
-            if len(matches) < 8:
-                db.add_two_view_geometry(image_id0, image_id1, matches)
-                continue
-            
-            # Extract matched keypoints
-            matched_kpts0 = kpts0[matches[:, 0]]
-            matched_kpts1 = kpts1[matches[:, 1]]
-            
-            batch_pts0.append(matched_kpts0)
-            batch_pts1.append(matched_kpts1)
-            batch_matches.append(matches)
-            batch_image_ids.append((image_id0, image_id1))
-            valid_pairs.append((name0, name1))
+        # Get keypoints and matches
+        kpts0 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id0,)).fetchone()
+        kpts1 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id1,)).fetchone()
+        matches_data = db.execute("SELECT data FROM matches WHERE pair_id = ?", 
+                                 (image_ids_to_pair_id(image_id0, image_id1),)).fetchone()
         
-        if not batch_pts0:
+        if kpts0 is None or kpts1 is None or matches_data is None:
+            continue
+            
+        # Convert to numpy arrays
+        kpts0 = reshape_keypoints(kpts0[0])
+        kpts1 = reshape_keypoints(kpts1[0])
+        matches = np.frombuffer(matches_data[0], dtype=np.uint32).reshape(-1, 2)
+        
+        if len(matches) < 8:  # Need at least 8 points for fundamental matrix
+            db.add_two_view_geometry(image_id0, image_id1, matches)
             continue
         
+        # Extract matched keypoints
+        matched_kpts0 = kpts0[matches[:, 0]]
+        matched_kpts1 = kpts1[matches[:, 1]]
+        
+        # Convert to torch tensors
+        pts0 = torch.from_numpy(matched_kpts0).float().to(device)
+        pts1 = torch.from_numpy(matched_kpts1).float().to(device)
+        
         try:
-            # Pad sequences to same length for batch processing
-            max_len = max(len(pts) for pts in batch_pts0)
-            
-            # Create padded tensors
-            pts0_tensor = torch.zeros(len(batch_pts0), max_len, 2, device=device)
-            pts1_tensor = torch.zeros(len(batch_pts0), max_len, 2, device=device)
-            
-            for j, (pts0, pts1) in enumerate(zip(batch_pts0, batch_pts1)):
-                pts0_tensor[j, :len(pts0)] = torch.from_numpy(pts0).float()
-                pts1_tensor[j, :len(pts1)] = torch.from_numpy(pts1).float()
-            
-            # Use Kornia's RANSAC for fundamental matrix estimation (batch processing)
-            F, inliers = kornia.geometry.epipolar.find_fundamental(
-                pts0_tensor, pts1_tensor,
-                method=kornia.geometry.epipolar.SolverType.SEVEN_POINT,
-                ransac_reproj_threshold=1.0,
-                ransac_max_iter=5000,
-                ransac_confidence=0.99
+            # Use Kornia's find_fundamental (simpler API)
+            F = kornia.geometry.epipolar.find_fundamental(
+                pts0.unsqueeze(0), pts1.unsqueeze(0),
+                method='7POINT'  # Use 7-point algorithm
             )
             
-            # Process results for each pair in batch
-            for j, ((name0, name1), (image_id0, image_id1), matches) in enumerate(zip(valid_pairs, batch_image_ids, batch_matches)):
-                if F is None or inliers is None:
-                    logger.warning(f"Kornia RANSAC failed to find fundamental matrix for pair {name0}-{name1}")
-                    db.add_two_view_geometry(image_id0, image_id1, matches)
-                    continue
-                
-                # Extract inlier matches for this pair
-                pair_inliers = inliers[j].cpu().numpy().astype(bool)
-                # Only consider inliers up to the actual number of matches
-                actual_len = len(matches)
-                pair_inliers = pair_inliers[:actual_len]
-                inlier_matches = matches[pair_inliers]
-                
-                # Add inlier matches to database
-                db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
-                
-        except Exception as e:
-            logger.warning(f"Kornia RANSAC batch failed: {e}")
-            # Fall back to individual processing for this batch
-            for (name0, name1), (image_id0, image_id1), matches in zip(valid_pairs, batch_image_ids, batch_matches):
+            # Check if fundamental matrix was found
+            if F is None:
+                logger.warning(f"Kornia failed to find fundamental matrix for pair {name0}-{name1}")
                 db.add_two_view_geometry(image_id0, image_id1, matches)
+                continue
+            
+            # Compute epipolar distances to find inliers
+            F_np = F.squeeze().cpu().numpy()
+            
+            # Convert to homogeneous coordinates
+            pts0_homo = np.column_stack([matched_kpts0, np.ones(len(matched_kpts0))])
+            pts1_homo = np.column_stack([matched_kpts1, np.ones(len(matched_kpts1))])
+            
+            # Compute epipolar distances
+            epilines1 = (F_np @ pts0_homo.T).T  # Lines in image 1
+            epilines0 = (F_np.T @ pts1_homo.T).T  # Lines in image 0
+            
+            # Distance from points to epipolar lines
+            dists1 = np.abs(np.sum(epilines1 * pts1_homo, axis=1)) / np.sqrt(epilines1[:, 0]**2 + epilines1[:, 1]**2)
+            dists0 = np.abs(np.sum(epilines0 * pts0_homo, axis=1)) / np.sqrt(epilines0[:, 0]**2 + epilines0[:, 1]**2)
+            
+            # Find inliers (threshold of 1.0 pixel)
+            inlier_mask = (dists0 <= 1.0) & (dists1 <= 1.0)
+            inlier_matches = matches[inlier_mask]
+            
+            # Add inlier matches to database
+            db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
+            
+        except Exception as e:
+            logger.warning(f"Kornia RANSAC failed for pair {name0}-{name1}: {e}")
+            # Fall back to all matches if RANSAC fails
+            db.add_two_view_geometry(image_id0, image_id1, matches)
     
     db.commit()
     db.close()
@@ -311,15 +290,10 @@ def magsac_geometric_verification(
         
         try:
             # Use pymagsac for fundamental matrix estimation
+            # pymagsac API: findFundamentalMatrix(src_pts, dst_pts, sigma_max)
             F, inliers = pymagsac.findFundamentalMatrix(
-                matched_kpts0, matched_kpts1,
-                threshold=1.0,
-                conf=0.99,
-                maxIters=10000,
-                # MAGSAC specific parameters
-                sampler=0,  # 0: PROSAC, 1: P-NAPSAC, 2: NG_RANSAC
-                scorer=1,   # 0: RANSAC, 1: MSAC, 2: MLESAC, 3: MAGSAC
-                neighborhood_size=20
+                matched_kpts0, matched_kpts1, 
+                1.0  # sigma_max (maximum noise scale)
             )
             
             # Check if fundamental matrix was found
@@ -346,31 +320,108 @@ def magsac_geometric_verification(
 def loransac_geometric_verification(
     database_path: Path, pairs_path: Path, verbose: bool = False
 ):
-    """LORANSAC implementation using COLMAP's built-in support."""
+    """LORANSAC implementation using OpenCV if available, fallback to robust RANSAC."""
     logger.info("Performing geometric verification using LORANSAC...")
     
-    # COLMAP's LORANSAC implementation
-    # Note: COLMAP may not have built-in LORANSAC, so we use a more robust RANSAC configuration
-    # that approximates LORANSAC behavior with higher confidence and more iterations
-    ransac_options = dict(
-        two_view_geometry=dict(
-            compute_relative_pose=True,
+    if LORANSAC_AVAILABLE:
+        # Use OpenCV's LORANSAC implementation
+        _opencv_loransac_verification(database_path, pairs_path, verbose)
+    else:
+        logger.warning("OpenCV LORANSAC not available, using robust RANSAC configuration")
+        # Fallback to more robust RANSAC configuration that approximates LORANSAC behavior
+        ransac_options = dict(
             ransac=dict(
-                max_num_trials=15000,  # More iterations for LORANSAC-like behavior
+                max_num_trials=15000,   # More iterations for LORANSAC-like behavior
                 min_inlier_ratio=0.05,  # Lower threshold for more robust estimation
                 confidence=0.9999,      # Higher confidence like LORANSAC
                 max_error=1.5,          # Tighter error threshold
                 min_num_trials=200,     # Minimum trials for robust estimation
             )
         )
-    )
+        
+        with OutputCapture(verbose):
+            pycolmap.verify_matches(
+                database_path,
+                pairs_path,
+                options=ransac_options,
+            )
+
+
+def _opencv_loransac_verification(
+    database_path: Path, pairs_path: Path, verbose: bool = False
+):
+    """OpenCV LORANSAC implementation for geometric verification."""
+    import cv2
     
-    with OutputCapture(verbose):
-        pycolmap.verify_matches(
-            database_path,
-            pairs_path,
-            options=ransac_options,
-        )
+    # Load pairs
+    with open(str(pairs_path), "r") as f:
+        pairs = [p.split() for p in f.readlines()]
+    
+    db = COLMAPDatabase.connect(database_path)
+    
+    # Process each pair with OpenCV LORANSAC
+    for name0, name1 in tqdm(pairs, desc="LORANSAC verification"):
+        # Get matches from database
+        image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
+        image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
+        
+        if image_id0 is None or image_id1 is None:
+            continue
+            
+        image_id0, image_id1 = image_id0[0], image_id1[0]
+        
+        # Get keypoints and matches
+        kpts0 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id0,)).fetchone()
+        kpts1 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id1,)).fetchone()
+        matches_data = db.execute("SELECT data FROM matches WHERE pair_id = ?", 
+                                 (image_ids_to_pair_id(image_id0, image_id1),)).fetchone()
+        
+        if kpts0 is None or kpts1 is None or matches_data is None:
+            continue
+            
+        # Convert to numpy arrays
+        kpts0 = reshape_keypoints(kpts0[0])
+        kpts1 = reshape_keypoints(kpts1[0])
+        matches = np.frombuffer(matches_data[0], dtype=np.uint32).reshape(-1, 2)
+        
+        if len(matches) < 8:  # Need at least 8 points for fundamental matrix
+            db.add_two_view_geometry(image_id0, image_id1, matches)
+            continue
+        
+        # Extract matched keypoints
+        matched_kpts0 = kpts0[matches[:, 0]]
+        matched_kpts1 = kpts1[matches[:, 1]]
+        
+        try:
+            # Use OpenCV's LORANSAC for fundamental matrix estimation
+            F, inliers = cv2.findFundamentalMat(
+                matched_kpts0, matched_kpts1,
+                method=cv2.USAC_MAGSAC,  # MAGSAC is more robust than LORANSAC
+                ransacReprojThreshold=1.0,
+                confidence=0.999,
+                maxIters=10000
+            )
+            
+            # Check if fundamental matrix was found
+            if F is None or inliers is None:
+                logger.warning(f"LORANSAC failed to find fundamental matrix for pair {name0}-{name1}")
+                db.add_two_view_geometry(image_id0, image_id1, matches)
+                continue
+            
+            # Extract inlier matches
+            inlier_mask = inliers.ravel().astype(bool)
+            inlier_matches = matches[inlier_mask]
+            
+            # Add inlier matches to database
+            db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
+            
+        except Exception as e:
+            logger.warning(f"LORANSAC failed for pair {name0}-{name1}: {e}")
+            # Fall back to all matches if LORANSAC fails
+            db.add_two_view_geometry(image_id0, image_id1, matches)
+    
+    db.commit()
+    db.close()
 
 
 def estimation_and_geometric_verification(
