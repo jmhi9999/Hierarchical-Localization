@@ -340,7 +340,7 @@ def pyransac_fundamental_matrix(pts0, pts1, matches, config, pyransac_lib):
     
     # Run LoRANSAC
     try:
-        # Try different PyRANSAC APIs
+        # Try different PyRANSAC APIs based on the actual module structure
         if hasattr(pyransac_lib, 'LoRANSAC'):
             # Direct LoRANSAC class
             loransac = pyransac_lib.LoRANSAC(
@@ -371,12 +371,39 @@ def pyransac_fundamental_matrix(pts0, pts1, matches, config, pyransac_lib):
                 local_opt_sample_size=config.get('lo_sample_size', 14)
             )
             
+        elif hasattr(pyransac_lib, 'loransac'):
+            # Direct loransac function
+            F, inliers = pyransac_lib.loransac(
+                data=data,
+                model_fit_func=fit_fundamental_matrix,
+                residual_func=compute_residuals,
+                min_samples=8,
+                threshold=config['threshold'],
+                max_iterations=config['max_iterations'],
+                confidence=config['confidence'],
+                local_opt_iterations=config.get('lo_iterations', 10),
+                local_opt_sample_size=config.get('lo_sample_size', 14)
+            )
+            
+        elif callable(pyransac_lib):
+            # Module is callable directly
+            F, inliers = pyransac_lib(
+                data=data,
+                model_fit_func=fit_fundamental_matrix,
+                residual_func=compute_residuals,
+                min_samples=8,
+                threshold=config['threshold'],
+                max_iterations=config['max_iterations'],
+                confidence=config['confidence']
+            )
+            
         else:
-            # Try to find LoRANSAC function
+            # Try to find any LoRANSAC-related function
             loransac_func = None
             for attr_name in dir(pyransac_lib):
-                if 'loransac' in attr_name.lower():
-                    loransac_func = getattr(pyransac_lib, attr_name)
+                attr = getattr(pyransac_lib, attr_name)
+                if callable(attr) and ('loransac' in attr_name.lower() or 'ransac' in attr_name.lower()):
+                    loransac_func = attr
                     break
             
             if loransac_func:
