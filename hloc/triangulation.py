@@ -28,7 +28,7 @@ except ImportError:
     LORANSAC_AVAILABLE = False
 
 from . import logger
-from .utils.database import COLMAPDatabase
+from .utils.database import COLMAPDatabase, image_ids_to_pair_id
 from .utils.geometry import compute_epipolar_errors
 from .utils.io import get_keypoints, get_matches
 from .utils.parsers import parse_retrieval
@@ -170,7 +170,7 @@ def kornia_geometric_verification(
             kpts0 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id0,)).fetchone()
             kpts1 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id1,)).fetchone()
             matches_data = db.execute("SELECT data FROM matches WHERE pair_id = ?", 
-                                     (db.pair_id_from_image_ids(image_id0, image_id1),)).fetchone()
+                                     (image_ids_to_pair_id(image_id0, image_id1),)).fetchone()
             
             if kpts0 is None or kpts1 is None or matches_data is None:
                 continue
@@ -276,7 +276,7 @@ def magsac_geometric_verification(
         kpts0 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id0,)).fetchone()
         kpts1 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id1,)).fetchone()
         matches_data = db.execute("SELECT data FROM matches WHERE pair_id = ?", 
-                                 (db.pair_id_from_image_ids(image_id0, image_id1),)).fetchone()
+                                 (image_ids_to_pair_id(image_id0, image_id1),)).fetchone()
         
         if kpts0 is None or kpts1 is None or matches_data is None:
             continue
