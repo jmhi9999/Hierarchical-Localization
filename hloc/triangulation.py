@@ -119,24 +119,27 @@ def loransac_estimation_and_geometric_verification(
 ):
     """Complete LoRANSAC implementation using PyRANSAC library"""
     from .utils.database import image_ids_to_pair_id, blob_to_array
+    import time
+    
+    start_time = time.time()
     
     # Try to import PyRANSAC
     try:
         import pyransac
         has_pyransac = True
-        if verbose:
-            logger.info("Using PyRANSAC for true LoRANSAC implementation")
+        logger.info("✓ SUCCESS: Using PyRANSAC for true LoRANSAC implementation")
+        logger.info(f"PyRANSAC version: {getattr(pyransac, '__version__', 'unknown')}")
     except ImportError:
         try:
             # Try alternative import
             from pyransac import ransac as pyransac
             has_pyransac = True
-            if verbose:
-                logger.info("Using PyRANSAC for true LoRANSAC implementation")
+            logger.info("✓ SUCCESS: Using PyRANSAC (alternative import) for true LoRANSAC implementation")
         except ImportError:
             has_pyransac = False
-            logger.warning("PyRANSAC not available, install with: pip install pyransac")
-            logger.info("Falling back to OpenCV USAC LoRANSAC")
+            logger.warning("✗ FALLBACK: PyRANSAC not available, install with: pip install pyransac")
+            logger.warning("✗ FALLBACK: Using OpenCV USAC LoRANSAC (much slower than PyRANSAC)")
+            logger.warning("✗ PERFORMANCE WARNING: This will be significantly slower!")
     
     # LoRANSAC configuration - optimized to beat pycolmap RANSAC speed while improving accuracy
     # Original pycolmap: max_num_trials=20000, min_inlier_ratio=0.05, confidence=0.999
@@ -224,16 +227,25 @@ def loransac_estimation_and_geometric_verification(
         pts1 = kps1[matches[:, 1]]
         
         try:
+            pair_start_time = time.time()
             if has_pyransac:
                 # Use true PyRANSAC LoRANSAC
+                if total_pairs <= 3:  # Log first few pairs for debugging
+                    logger.info(f"Processing pair {name0}-{name1} with PyRANSAC LoRANSAC ({len(matches)} matches)")
                 F, inlier_matches = pyransac_fundamental_matrix(
                     pts0, pts1, matches, loransac_config, pyransac
                 )
             else:
                 # Fallback to OpenCV USAC
+                if total_pairs <= 3:  # Log first few pairs for debugging
+                    logger.info(f"Processing pair {name0}-{name1} with OpenCV USAC LoRANSAC ({len(matches)} matches)")
                 F, inlier_matches = opencv_loransac_fundamental_matrix(
                     pts0, pts1, matches, loransac_config
                 )
+            
+            pair_time = time.time() - pair_start_time
+            if total_pairs <= 3:  # Log timing for first few pairs
+                logger.info(f"Pair {name0}-{name1} processed in {pair_time:.3f}s")
             
             if F is not None and len(inlier_matches) > 0:
                 inlier_ratio = len(inlier_matches) / len(matches)
@@ -291,11 +303,23 @@ def loransac_estimation_and_geometric_verification(
     
     success_rate = successful_verifications / max(total_pairs, 1) * 100
     method = "PyRANSAC" if has_pyransac else "OpenCV USAC"
-    logger.info(f"{method} LoRANSAC geometric verification completed: {successful_verifications}/{total_pairs} pairs verified successfully ({success_rate:.1f}%)")
+    elapsed_time = time.time() - start_time
+    
+    logger.info(f"=== LoRANSAC PERFORMANCE REPORT ===")
+    logger.info(f"Method used: {method} LoRANSAC")
+    logger.info(f"Total time: {elapsed_time:.2f} seconds")
+    logger.info(f"Pairs processed: {total_pairs}")
+    logger.info(f"Successful verifications: {successful_verifications}")
+    logger.info(f"Success rate: {success_rate:.1f}%")
+    logger.info(f"Time per pair: {elapsed_time/max(total_pairs, 1):.3f} seconds")
+    logger.info(f"==================================")
 
 
 def pyransac_fundamental_matrix(pts0, pts1, matches, config, pyransac_lib):
     """True LoRANSAC implementation using PyRANSAC"""
+    
+    logger.debug(f"PyRANSAC LoRANSAC: Processing {len(pts0)} point correspondences")
+    logger.debug(f"PyRANSAC config: threshold={config['threshold']}, max_iter={config['max_iterations']}")
     
     # Prepare data for PyRANSAC
     data = np.column_stack([pts0, pts1])
@@ -370,17 +394,23 @@ def pyransac_fundamental_matrix(pts0, pts1, matches, config, pyransac_lib):
         
         if F is not None and len(inliers) > 0:
             inlier_matches = matches[inliers]
+            logger.debug(f"PyRANSAC SUCCESS: Found {len(inliers)} inliers from {len(matches)} matches")
             return F, inlier_matches
         else:
+            logger.debug("PyRANSAC FAILED: No valid fundamental matrix found")
             return None, np.array([]).reshape(0, 2)
             
     except Exception as e:
+        logger.warning(f"PyRANSAC ERROR: {e}, falling back to manual LoRANSAC")
         # Fallback to manual LoRANSAC implementation
         return manual_loransac_fundamental_matrix(data, matches, config)
 
 
 def manual_loransac_fundamental_matrix(data, matches, config):
     """High-speed LoRANSAC optimized to beat pycolmap RANSAC while improving accuracy"""
+    
+    logger.debug(f"MANUAL LoRANSAC: Processing {len(data)} correspondences (PyRANSAC fallback)")
+    logger.debug(f"MANUAL config: threshold={config['threshold']}, max_iter={config['max_iterations']}")
     
     best_F = None
     best_inliers = []
@@ -517,7 +547,12 @@ def manual_loransac_fundamental_matrix(data, matches, config):
                 if inlier_ratio > config.get('quality_threshold', 0.8):
                     return best_F, matches[best_inliers]
     
-    return best_F, matches[best_inliers] if best_F is not None else (None, np.array([]).reshape(0, 2))
+    if best_F is not None:
+        logger.debug(f"MANUAL LoRANSAC SUCCESS: Found {len(best_inliers)} inliers from {len(matches)} matches")
+        return best_F, matches[best_inliers]
+    else:
+        logger.debug("MANUAL LoRANSAC FAILED: No valid fundamental matrix found")
+        return None, np.array([]).reshape(0, 2)
 
 
 def fit_fundamental_matrix_8point_fast(pts0, pts1):
