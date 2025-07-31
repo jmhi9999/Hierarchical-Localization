@@ -17,17 +17,19 @@ def get_robust_mapper_options(ransac_option: str = "ransac"):
     
     if ransac_option == "magsac":
         # MAGSAC is more conservative, so relax reconstruction parameters
+        # Only use options that are compatible with pycolmap.IncrementalPipelineOptions
         return {
             **base_options,
             "min_num_matches": 10,  # Lower threshold (default 15)
             "min_model_size": 8,    # Allow smaller models (default 10)
             "max_model_overlap": 30, # Allow more overlap (default 20)
-            "abs_pose_min_num_inliers": 15,  # Lower inlier requirement (default 30)
-            "abs_pose_min_inlier_ratio": 0.15,  # Lower ratio (default 0.25)
-            "filter_max_reproj_error": 6.0,  # More lenient reprojection error (default 4.0)
-            "filter_min_tri_angle": 1.0,  # Lower triangulation angle (default 1.5)
-            "init_min_num_inliers": 80,  # Lower initialization requirement (default 100)
-            "init_min_inlier_ratio": 0.2,  # Lower initialization ratio (default 0.25) 
+            # Remove incompatible options that cause AttributeError
+            # "abs_pose_min_num_inliers": 15,  
+            # "abs_pose_min_inlier_ratio": 0.15,  
+            # "filter_max_reproj_error": 6.0,
+            # "filter_min_tri_angle": 1.0,
+            # "init_min_num_inliers": 80,
+            # "init_min_inlier_ratio": 0.2,
         }
     elif ransac_option == "loransac":
         # LORANSAC is more accurate, can use stricter parameters

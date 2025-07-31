@@ -218,11 +218,23 @@ def kornia_geometric_verification(
         pts1 = torch.from_numpy(matched_kpts1).float().to(device)
         
         try:
-            # Use Kornia's find_fundamental (simpler API)
-            F = kornia.geometry.epipolar.find_fundamental(
-                pts0.unsqueeze(0), pts1.unsqueeze(0),
-                method='7POINT'  # Use 7-point algorithm
-            )
+            # Kornia's 7POINT method requires exactly 7 points
+            if len(pts0) < 7:
+                db.add_two_view_geometry(image_id0, image_id1, matches)
+                stats['failed_pairs'] += 1
+                continue
+            elif len(pts0) == 7:
+                # Exactly 7 points - use 7POINT method
+                F = kornia.geometry.epipolar.find_fundamental(
+                    pts0.unsqueeze(0), pts1.unsqueeze(0),
+                    method='7POINT'
+                )
+            else:
+                # More than 7 points - use RANSAC approach with random sampling
+                F = kornia.geometry.epipolar.find_fundamental(
+                    pts0.unsqueeze(0), pts1.unsqueeze(0),
+                    method='RANSAC'  # Use RANSAC for variable number of points
+                )
             
             # Check if fundamental matrix was found
             if F is None:
@@ -365,11 +377,27 @@ def magsac_geometric_verification(
             # pymagsac API: findFundamentalMatrix(src_pts, dst_pts, sigma_max)
             F, inliers = pymagsac.findFundamentalMatrix(
                 matched_kpts0, matched_kpts1, 
-                2.5  # sigma_max (increased from 1.0 for better reconstruction coverage)
+                1.5  # sigma_max (balanced between robustness and coverage)
             )
+            
+            # Debug: Check input data quality
+            if verbose and stats['processed_pairs'] < 5:  # Only for first few pairs
+                logger.info(f"MAGSAC Debug - Pair {pair_key}:")
+                logger.info(f"  Input matches: {len(matches)}")
+                logger.info(f"  Keypoints shape: {matched_kpts0.shape}, {matched_kpts1.shape}")
+                logger.info(f"  F matrix: {F is not None}, Inliers: {inliers is not None}")
+                if inliers is not None:
+                    logger.info(f"  Inlier count: {np.sum(inliers)}/{len(inliers)} ({100*np.sum(inliers)/len(inliers):.1f}%)")
             
             # Check if fundamental matrix was found
             if F is None or inliers is None:
+                db.add_two_view_geometry(image_id0, image_id1, matches)
+                stats['failed_pairs'] += 1
+                continue
+            
+            # Check if we have enough inliers
+            num_inliers = np.sum(inliers)
+            if num_inliers < 8:  # Need at least 8 inliers for reliable geometry
                 db.add_two_view_geometry(image_id0, image_id1, matches)
                 stats['failed_pairs'] += 1
                 continue
