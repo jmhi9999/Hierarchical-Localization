@@ -103,15 +103,14 @@ def import_matches(
 
 
 def estimation_and_geometric_verification(
-    database_path: Path, pairs_path: Path, verbose: bool = False, confidence: float = 0.95
-):
+    database_path: Path, pairs_path: Path, verbose: bool = False, confidence: float = 0.99):
     logger.info("Performing geometric verification of the matches...")
     with OutputCapture(verbose):
         pycolmap.verify_matches(
             database_path,
             pairs_path,
             options=dict(
-                ransac=dict(max_num_trials=20000, min_inlier_ratio=0.05, confidence=confidence)
+                ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1, confidence=confidence)
             ),
         )
 
