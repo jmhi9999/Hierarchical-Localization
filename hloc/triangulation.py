@@ -116,122 +116,143 @@ def loransac_estimation_and_geometric_verification(
     """Enhanced geometric verification using true LoRANSAC with PyRANSAC"""
     from .utils.database import image_ids_to_pair_id, array_to_blob, blob_to_array
     
+    # Try different PyRANSAC import paths
+    LoRANSAC = None
+    Model = None
+    
     try:
         from pyransac import LoRANSAC
         from pyransac.base import Model
-        import numpy as np
-        
-        class FundamentalMatrixModel(Model):
-            """Fundamental Matrix model for LoRANSAC"""
-            def __init__(self):
-                super().__init__()
-                
-            def fit(self, data):
-                """Fit fundamental matrix using 8-point algorithm"""
-                if len(data) < 8:
-                    return None
-                    
-                pts0, pts1 = data[:, :2], data[:, 2:]
-                
-                # Normalize points
-                pts0_norm = cv2.undistortPoints(pts0.reshape(-1, 1, 2), np.eye(3), None).reshape(-1, 2)
-                pts1_norm = cv2.undistortPoints(pts1.reshape(-1, 1, 2), np.eye(3), None).reshape(-1, 2)
-                
-                # 8-point algorithm
-                A = np.zeros((len(pts0_norm), 9))
-                for i in range(len(pts0_norm)):
-                    x0, y0 = pts0_norm[i]
-                    x1, y1 = pts1_norm[i]
-                    A[i] = [x0*x1, x0*y1, x0, y0*x1, y0*y1, y0, x1, y1, 1]
-                
-                # Solve using SVD
-                _, _, Vt = np.linalg.svd(A)
-                F = Vt[-1].reshape(3, 3)
-                
-                # Enforce rank-2 constraint
-                U, S, Vt = np.linalg.svd(F)
-                S[2] = 0
-                F = U @ np.diag(S) @ Vt
-                
-                return F
-                
-            def residuals(self, data, model):
-                """Compute Sampson distance residuals"""
-                if model is None:
-                    return np.inf * np.ones(len(data))
-                    
-                pts0, pts1 = data[:, :2], data[:, 2:]
-                
-                # Convert to homogeneous coordinates
-                pts0_h = np.column_stack([pts0, np.ones(len(pts0))])
-                pts1_h = np.column_stack([pts1, np.ones(len(pts1))])
-                
-                # Compute Sampson distance
-                Fx = model @ pts0_h.T
-                Ftx = model.T @ pts1_h.T
-                
-                # Numerator: (x'^T F x)^2
-                numerator = (pts1_h * (model @ pts0_h.T).T).sum(axis=1) ** 2
-                
-                # Denominator: (Fx)_1^2 + (Fx)_2^2 + (F^T x')_1^2 + (F^T x')_2^2
-                denominator = Fx[0]**2 + Fx[1]**2 + Ftx[0]**2 + Ftx[1]**2
-                
-                # Avoid division by zero
-                denominator = np.where(denominator < 1e-10, 1e-10, denominator)
-                
-                return numerator / denominator
-                
-        class EssentialMatrixModel(Model):
-            """Essential Matrix model for LoRANSAC"""
-            def __init__(self, K1, K2):
-                super().__init__()
-                self.K1 = K1
-                self.K2 = K2
-                
-            def fit(self, data):
-                """Fit essential matrix using 5-point algorithm"""
-                if len(data) < 5:
-                    return None
-                    
-                pts0, pts1 = data[:, :2], data[:, 2:]
-                
-                # Normalize points using camera intrinsics
-                pts0_norm = cv2.undistortPoints(pts0.reshape(-1, 1, 2), self.K1, None).reshape(-1, 2)
-                pts1_norm = cv2.undistortPoints(pts1.reshape(-1, 1, 2), self.K2, None).reshape(-1, 2)
-                
-                # Use OpenCV's 5-point algorithm
-                E, mask = cv2.findEssentialMat(
-                    pts0_norm, pts1_norm, 
-                    focal=1.0, pp=(0., 0.),
-                    method=cv2.RANSAC, prob=0.999, threshold=1.0
-                )
-                
-                return E
-                
-            def residuals(self, data, model):
-                """Compute epipolar constraint residuals"""
-                if model is None:
-                    return np.inf * np.ones(len(data))
-                    
-                pts0, pts1 = data[:, :2], data[:, 2:]
-                
-                # Normalize points
-                pts0_norm = cv2.undistortPoints(pts0.reshape(-1, 1, 2), self.K1, None).reshape(-1, 2)
-                pts1_norm = cv2.undistortPoints(pts1.reshape(-1, 1, 2), self.K2, None).reshape(-1, 2)
-                
-                # Convert to homogeneous coordinates
-                pts0_h = np.column_stack([pts0_norm, np.ones(len(pts0_norm))])
-                pts1_h = np.column_stack([pts1_norm, np.ones(len(pts1_norm))])
-                
-                # Compute epipolar constraint: x'^T E x = 0
-                residuals = np.abs((pts1_h * (model @ pts0_h.T).T).sum(axis=1))
-                
-                return residuals
-        
-    except ImportError:
-        logger.warning("PyRANSAC not available, falling back to standard RANSAC")
-        # Fallback to standard RANSAC implementation
+        logger.info("PyRANSAC imported successfully from pyransac")
+    except ImportError as e1:
+        try:
+            from pyransac3d import LoRANSAC
+            from pyransac3d.base import Model
+            logger.info("PyRANSAC imported successfully from pyransac3d")
+        except ImportError as e2:
+            try:
+                import pyransac
+                LoRANSAC = pyransac.LoRANSAC
+                Model = pyransac.base.Model
+                logger.info("PyRANSAC imported successfully from pyransac module")
+            except ImportError as e3:
+                logger.warning(f"PyRANSAC not available. Import errors: {e1}, {e2}, {e3}")
+                logger.warning("Falling back to standard RANSAC")
+                return standard_ransac_verification(database_path, pairs_path, verbose)
+    
+    if LoRANSAC is None or Model is None:
+        logger.warning("PyRANSAC classes not found, falling back to standard RANSAC")
         return standard_ransac_verification(database_path, pairs_path, verbose)
+    
+    import numpy as np
+    import cv2
+    
+    class FundamentalMatrixModel(Model):
+        """Fundamental Matrix model for LoRANSAC"""
+        def __init__(self):
+            super().__init__()
+            
+        def fit(self, data):
+            """Fit fundamental matrix using 8-point algorithm"""
+            if len(data) < 8:
+                return None
+                
+            pts0, pts1 = data[:, :2], data[:, 2:]
+            
+            # Normalize points
+            pts0_norm = cv2.undistortPoints(pts0.reshape(-1, 1, 2), np.eye(3), None).reshape(-1, 2)
+            pts1_norm = cv2.undistortPoints(pts1.reshape(-1, 1, 2), np.eye(3), None).reshape(-1, 2)
+            
+            # 8-point algorithm
+            A = np.zeros((len(pts0_norm), 9))
+            for i in range(len(pts0_norm)):
+                x0, y0 = pts0_norm[i]
+                x1, y1 = pts1_norm[i]
+                A[i] = [x0*x1, x0*y1, x0, y0*x1, y0*y1, y0, x1, y1, 1]
+            
+            # Solve using SVD
+            _, _, Vt = np.linalg.svd(A)
+            F = Vt[-1].reshape(3, 3)
+            
+            # Enforce rank-2 constraint
+            U, S, Vt = np.linalg.svd(F)
+            S[2] = 0
+            F = U @ np.diag(S) @ Vt
+            
+            return F
+            
+        def residuals(self, data, model):
+            """Compute Sampson distance residuals"""
+            if model is None:
+                return np.inf * np.ones(len(data))
+                
+            pts0, pts1 = data[:, :2], data[:, 2:]
+            
+            # Convert to homogeneous coordinates
+            pts0_h = np.column_stack([pts0, np.ones(len(pts0))])
+            pts1_h = np.column_stack([pts1, np.ones(len(pts1))])
+            
+            # Compute Sampson distance
+            Fx = model @ pts0_h.T
+            Ftx = model.T @ pts1_h.T
+            
+            # Numerator: (x'^T F x)^2
+            numerator = (pts1_h * (model @ pts0_h.T).T).sum(axis=1) ** 2
+            
+            # Denominator: (Fx)_1^2 + (Fx)_2^2 + (F^T x')_1^2 + (F^T x')_2^2
+            denominator = Fx[0]**2 + Fx[1]**2 + Ftx[0]**2 + Ftx[1]**2
+            
+            # Avoid division by zero
+            denominator = np.where(denominator < 1e-10, 1e-10, denominator)
+            
+            return numerator / denominator
+            
+    class EssentialMatrixModel(Model):
+        """Essential Matrix model for LoRANSAC"""
+        def __init__(self, K1, K2):
+            super().__init__()
+            self.K1 = K1
+            self.K2 = K2
+            
+        def fit(self, data):
+            """Fit essential matrix using 5-point algorithm"""
+            if len(data) < 5:
+                return None
+                
+            pts0, pts1 = data[:, :2], data[:, 2:]
+            
+            # Normalize points using camera intrinsics
+            pts0_norm = cv2.undistortPoints(pts0.reshape(-1, 1, 2), self.K1, None).reshape(-1, 2)
+            pts1_norm = cv2.undistortPoints(pts1.reshape(-1, 1, 2), self.K2, None).reshape(-1, 2)
+            
+            # Use OpenCV's 5-point algorithm
+            E, mask = cv2.findEssentialMat(
+                pts0_norm, pts1_norm, 
+                focal=1.0, pp=(0., 0.),
+                method=cv2.RANSAC, prob=0.999, threshold=1.0
+            )
+            
+            return E
+            
+        def residuals(self, data, model):
+            """Compute epipolar constraint residuals"""
+            if model is None:
+                return np.inf * np.ones(len(data))
+                
+            pts0, pts1 = data[:, :2], data[:, 2:]
+            
+            # Normalize points
+            pts0_norm = cv2.undistortPoints(pts0.reshape(-1, 1, 2), self.K1, None).reshape(-1, 2)
+            pts1_norm = cv2.undistortPoints(pts1.reshape(-1, 1, 2), self.K2, None).reshape(-1, 2)
+            
+            # Convert to homogeneous coordinates
+            pts0_h = np.column_stack([pts0_norm, np.ones(len(pts0_norm))])
+            pts1_h = np.column_stack([pts1_norm, np.ones(len(pts1_norm))])
+            
+            # Compute epipolar constraint: x'^T E x = 0
+            residuals = np.abs((pts1_h * (model @ pts0_h.T).T).sum(axis=1))
+            
+            return residuals
     
     # LoRANSAC configuration
     loransac_config = {
