@@ -1,4 +1,5 @@
 import argparse
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -146,20 +147,38 @@ def kornia_geometric_verification(
         logger.error("Kornia is not available. Please install kornia: pip install kornia")
         raise ImportError("kornia is required for kornia_ransac option")
     
-    logger.info("Performing geometric verification using Kornia RANSAC...")
+    start_time = time.time()
+    logger.info("=" * 60)
+    logger.info("🚀 KORNIA RANSAC GEOMETRIC VERIFICATION STARTED")
+    logger.info("=" * 60)
     
     # Check if GPU is available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Using device: {device}")
+    logger.info(f"📱 Using device: {device}")
     
     # Load pairs
     with open(str(pairs_path), "r") as f:
         pairs = [p.split() for p in f.readlines()]
     
+    logger.info(f"📊 Total pairs to process: {len(pairs)}")
+    
     db = COLMAPDatabase.connect(database_path)
+    
+    # Statistics tracking
+    stats = {
+        'total_pairs': len(pairs),
+        'processed_pairs': 0,
+        'successful_pairs': 0,
+        'failed_pairs': 0,
+        'total_matches': 0,
+        'total_inliers': 0,
+        'processing_times': []
+    }
     
     # Process each pair individually (simpler and more robust)
     for name0, name1 in tqdm(pairs, desc="Kornia RANSAC verification"):
+        pair_start_time = time.time()
+        
         # Get matches from database
         image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
         image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
@@ -185,7 +204,10 @@ def kornia_geometric_verification(
         
         if len(matches) < 8:  # Need at least 8 points for fundamental matrix
             db.add_two_view_geometry(image_id0, image_id1, matches)
+            stats['processed_pairs'] += 1
             continue
+        
+        stats['total_matches'] += len(matches)
         
         # Extract matched keypoints
         matched_kpts0 = kpts0[matches[:, 0]]
@@ -204,8 +226,8 @@ def kornia_geometric_verification(
             
             # Check if fundamental matrix was found
             if F is None:
-                logger.warning(f"Kornia failed to find fundamental matrix for pair {name0}-{name1}")
                 db.add_two_view_geometry(image_id0, image_id1, matches)
+                stats['failed_pairs'] += 1
                 continue
             
             # Compute epipolar distances to find inliers
@@ -227,6 +249,10 @@ def kornia_geometric_verification(
             inlier_mask = (dists0 <= 1.0) & (dists1 <= 1.0)
             inlier_matches = matches[inlier_mask]
             
+            # Update statistics
+            stats['total_inliers'] += len(inlier_matches)
+            stats['successful_pairs'] += 1
+            
             # Add inlier matches to database
             db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
             
@@ -234,9 +260,34 @@ def kornia_geometric_verification(
             logger.warning(f"Kornia RANSAC failed for pair {name0}-{name1}: {e}")
             # Fall back to all matches if RANSAC fails
             db.add_two_view_geometry(image_id0, image_id1, matches)
+            stats['failed_pairs'] += 1
+        
+        pair_time = time.time() - pair_start_time
+        stats['processing_times'].append(pair_time)
+        stats['processed_pairs'] += 1
     
     db.commit()
     db.close()
+    
+    # Calculate and log final statistics
+    total_time = time.time() - start_time
+    avg_inlier_ratio = (stats['total_inliers'] / stats['total_matches']) * 100 if stats['total_matches'] > 0 else 0
+    avg_pair_time = np.mean(stats['processing_times']) if stats['processing_times'] else 0
+    success_rate = (stats['successful_pairs'] / stats['processed_pairs']) * 100 if stats['processed_pairs'] > 0 else 0
+    
+    logger.info("=" * 60)
+    logger.info("🏁 KORNIA RANSAC VERIFICATION COMPLETED")
+    logger.info("=" * 60)
+    logger.info(f"⏱️  Total time: {total_time:.2f} seconds")
+    logger.info(f"📈 Average time per pair: {avg_pair_time:.3f} seconds")
+    logger.info(f"📊 Processed pairs: {stats['processed_pairs']}/{stats['total_pairs']}")
+    logger.info(f"✅ Successful pairs: {stats['successful_pairs']} ({success_rate:.1f}%)")
+    logger.info(f"❌ Failed pairs: {stats['failed_pairs']}")
+    logger.info(f"🎯 Total matches: {stats['total_matches']}")
+    logger.info(f"✨ Total inliers: {stats['total_inliers']}")
+    logger.info(f"📏 Average inlier ratio: {avg_inlier_ratio:.1f}%")
+    logger.info(f"🚀 Throughput: {stats['processed_pairs']/total_time:.1f} pairs/second")
+    logger.info("=" * 60)
 
 
 def magsac_geometric_verification(
@@ -247,16 +298,34 @@ def magsac_geometric_verification(
         logger.error("PyMAGSAC is not available. Please install: pip install pymagsac")
         raise ImportError("pymagsac is required for magsac option")
     
-    logger.info("Performing geometric verification using MAGSAC...")
+    start_time = time.time()
+    logger.info("=" * 60)
+    logger.info("🎯 MAGSAC GEOMETRIC VERIFICATION STARTED")
+    logger.info("=" * 60)
     
     # Load pairs
     with open(str(pairs_path), "r") as f:
         pairs = [p.split() for p in f.readlines()]
     
+    logger.info(f"📊 Total pairs to process: {len(pairs)}")
+    
     db = COLMAPDatabase.connect(database_path)
+    
+    # Statistics tracking
+    stats = {
+        'total_pairs': len(pairs),
+        'processed_pairs': 0,
+        'successful_pairs': 0,
+        'failed_pairs': 0,
+        'total_matches': 0,
+        'total_inliers': 0,
+        'processing_times': []
+    }
     
     # Process each pair with MAGSAC
     for name0, name1 in tqdm(pairs, desc="MAGSAC verification"):
+        pair_start_time = time.time()
+        
         # Get matches from database
         image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
         image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
@@ -282,7 +351,10 @@ def magsac_geometric_verification(
         
         if len(matches) < 8:  # Need at least 8 points for fundamental matrix
             db.add_two_view_geometry(image_id0, image_id1, matches)
+            stats['processed_pairs'] += 1
             continue
+        
+        stats['total_matches'] += len(matches)
         
         # Extract matched keypoints
         matched_kpts0 = kpts0[matches[:, 0]]
@@ -293,17 +365,21 @@ def magsac_geometric_verification(
             # pymagsac API: findFundamentalMatrix(src_pts, dst_pts, sigma_max)
             F, inliers = pymagsac.findFundamentalMatrix(
                 matched_kpts0, matched_kpts1, 
-                1.0  # sigma_max (maximum noise scale)
+                2.5  # sigma_max (increased from 1.0 for better reconstruction coverage)
             )
             
             # Check if fundamental matrix was found
             if F is None or inliers is None:
-                logger.warning(f"MAGSAC failed to find fundamental matrix for pair {name0}-{name1}")
                 db.add_two_view_geometry(image_id0, image_id1, matches)
+                stats['failed_pairs'] += 1
                 continue
             
             # Extract inlier matches
             inlier_matches = matches[inliers.astype(bool)]
+            
+            # Update statistics
+            stats['total_inliers'] += len(inlier_matches)
+            stats['successful_pairs'] += 1
             
             # Add inlier matches to database
             db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
@@ -312,22 +388,51 @@ def magsac_geometric_verification(
             logger.warning(f"MAGSAC failed for pair {name0}-{name1}: {e}")
             # Fall back to all matches if MAGSAC fails
             db.add_two_view_geometry(image_id0, image_id1, matches)
+            stats['failed_pairs'] += 1
+        
+        pair_time = time.time() - pair_start_time
+        stats['processing_times'].append(pair_time)
+        stats['processed_pairs'] += 1
     
     db.commit()
     db.close()
+    
+    # Calculate and log final statistics
+    total_time = time.time() - start_time
+    avg_inlier_ratio = (stats['total_inliers'] / stats['total_matches']) * 100 if stats['total_matches'] > 0 else 0
+    avg_pair_time = np.mean(stats['processing_times']) if stats['processing_times'] else 0
+    success_rate = (stats['successful_pairs'] / stats['processed_pairs']) * 100 if stats['processed_pairs'] > 0 else 0
+    
+    logger.info("=" * 60)
+    logger.info("🏁 MAGSAC VERIFICATION COMPLETED")
+    logger.info("=" * 60)
+    logger.info(f"⏱️  Total time: {total_time:.2f} seconds")
+    logger.info(f"📈 Average time per pair: {avg_pair_time:.3f} seconds")
+    logger.info(f"📊 Processed pairs: {stats['processed_pairs']}/{stats['total_pairs']}")
+    logger.info(f"✅ Successful pairs: {stats['successful_pairs']} ({success_rate:.1f}%)")
+    logger.info(f"❌ Failed pairs: {stats['failed_pairs']}")
+    logger.info(f"🎯 Total matches: {stats['total_matches']}")
+    logger.info(f"✨ Total inliers: {stats['total_inliers']}")
+    logger.info(f"📏 Average inlier ratio: {avg_inlier_ratio:.1f}%")
+    logger.info(f"🚀 Throughput: {stats['processed_pairs']/total_time:.1f} pairs/second")
+    logger.info("=" * 60)
 
 
 def loransac_geometric_verification(
     database_path: Path, pairs_path: Path, verbose: bool = False
 ):
     """LORANSAC implementation using OpenCV if available, fallback to robust RANSAC."""
-    logger.info("Performing geometric verification using LORANSAC...")
+    start_time = time.time()
+    logger.info("=" * 60)
+    logger.info("🎪 LORANSAC GEOMETRIC VERIFICATION STARTED")
+    logger.info("=" * 60)
     
     if LORANSAC_AVAILABLE:
+        logger.info("✅ Using OpenCV's MAGSAC implementation")
         # Use OpenCV's LORANSAC implementation
-        _opencv_loransac_verification(database_path, pairs_path, verbose)
+        _opencv_loransac_verification(database_path, pairs_path, verbose, start_time)
     else:
-        logger.warning("OpenCV LORANSAC not available, using robust RANSAC configuration")
+        logger.warning("⚠️  OpenCV LORANSAC not available, using robust RANSAC configuration")
         # Fallback to more robust RANSAC configuration that approximates LORANSAC behavior
         ransac_options = dict(
             ransac=dict(
@@ -345,22 +450,48 @@ def loransac_geometric_verification(
                 pairs_path,
                 options=ransac_options,
             )
+        
+        total_time = time.time() - start_time
+        logger.info("=" * 60)
+        logger.info("🏁 LORANSAC (FALLBACK) VERIFICATION COMPLETED")
+        logger.info("=" * 60)
+        logger.info(f"⏱️  Total time: {total_time:.2f} seconds")
+        logger.info(f"🚀 Used robust RANSAC fallback configuration")
+        logger.info("=" * 60)
 
 
 def _opencv_loransac_verification(
-    database_path: Path, pairs_path: Path, verbose: bool = False
+    database_path: Path, pairs_path: Path, verbose: bool = False, start_time: float = None
 ):
     """OpenCV LORANSAC implementation for geometric verification."""
     import cv2
+    
+    if start_time is None:
+        start_time = time.time()
     
     # Load pairs
     with open(str(pairs_path), "r") as f:
         pairs = [p.split() for p in f.readlines()]
     
+    logger.info(f"📊 Total pairs to process: {len(pairs)}")
+    
     db = COLMAPDatabase.connect(database_path)
+    
+    # Statistics tracking
+    stats = {
+        'total_pairs': len(pairs),
+        'processed_pairs': 0,
+        'successful_pairs': 0,
+        'failed_pairs': 0,
+        'total_matches': 0,
+        'total_inliers': 0,
+        'processing_times': []
+    }
     
     # Process each pair with OpenCV LORANSAC
     for name0, name1 in tqdm(pairs, desc="LORANSAC verification"):
+        pair_start_time = time.time()
+        
         # Get matches from database
         image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
         image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
@@ -386,14 +517,17 @@ def _opencv_loransac_verification(
         
         if len(matches) < 8:  # Need at least 8 points for fundamental matrix
             db.add_two_view_geometry(image_id0, image_id1, matches)
+            stats['processed_pairs'] += 1
             continue
+        
+        stats['total_matches'] += len(matches)
         
         # Extract matched keypoints
         matched_kpts0 = kpts0[matches[:, 0]]
         matched_kpts1 = kpts1[matches[:, 1]]
         
         try:
-            # Use OpenCV's LORANSAC for fundamental matrix estimation
+            # Use OpenCV's MAGSAC for fundamental matrix estimation
             F, inliers = cv2.findFundamentalMat(
                 matched_kpts0, matched_kpts1,
                 method=cv2.USAC_MAGSAC,  # MAGSAC is more robust than LORANSAC
@@ -404,13 +538,17 @@ def _opencv_loransac_verification(
             
             # Check if fundamental matrix was found
             if F is None or inliers is None:
-                logger.warning(f"LORANSAC failed to find fundamental matrix for pair {name0}-{name1}")
                 db.add_two_view_geometry(image_id0, image_id1, matches)
+                stats['failed_pairs'] += 1
                 continue
             
             # Extract inlier matches
             inlier_mask = inliers.ravel().astype(bool)
             inlier_matches = matches[inlier_mask]
+            
+            # Update statistics
+            stats['total_inliers'] += len(inlier_matches)
+            stats['successful_pairs'] += 1
             
             # Add inlier matches to database
             db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
@@ -419,9 +557,34 @@ def _opencv_loransac_verification(
             logger.warning(f"LORANSAC failed for pair {name0}-{name1}: {e}")
             # Fall back to all matches if LORANSAC fails
             db.add_two_view_geometry(image_id0, image_id1, matches)
+            stats['failed_pairs'] += 1
+        
+        pair_time = time.time() - pair_start_time
+        stats['processing_times'].append(pair_time)
+        stats['processed_pairs'] += 1
     
     db.commit()
     db.close()
+    
+    # Calculate and log final statistics
+    total_time = time.time() - start_time
+    avg_inlier_ratio = (stats['total_inliers'] / stats['total_matches']) * 100 if stats['total_matches'] > 0 else 0
+    avg_pair_time = np.mean(stats['processing_times']) if stats['processing_times'] else 0
+    success_rate = (stats['successful_pairs'] / stats['processed_pairs']) * 100 if stats['processed_pairs'] > 0 else 0
+    
+    logger.info("=" * 60)
+    logger.info("🏁 LORANSAC (OPENCV) VERIFICATION COMPLETED")
+    logger.info("=" * 60)
+    logger.info(f"⏱️  Total time: {total_time:.2f} seconds")
+    logger.info(f"📈 Average time per pair: {avg_pair_time:.3f} seconds")
+    logger.info(f"📊 Processed pairs: {stats['processed_pairs']}/{stats['total_pairs']}")
+    logger.info(f"✅ Successful pairs: {stats['successful_pairs']} ({success_rate:.1f}%)")
+    logger.info(f"❌ Failed pairs: {stats['failed_pairs']}")
+    logger.info(f"🎯 Total matches: {stats['total_matches']}")
+    logger.info(f"✨ Total inliers: {stats['total_inliers']}")
+    logger.info(f"📏 Average inlier ratio: {avg_inlier_ratio:.1f}%")
+    logger.info(f"🚀 Throughput: {stats['processed_pairs']/total_time:.1f} pairs/second")
+    logger.info("=" * 60)
 
 
 def estimation_and_geometric_verification(
@@ -444,6 +607,11 @@ def estimation_and_geometric_verification(
         return
     
     # Standard RANSAC using COLMAP's default implementation
+    start_time = time.time()
+    logger.info("=" * 60)
+    logger.info("⚡ STANDARD RANSAC GEOMETRIC VERIFICATION STARTED")
+    logger.info("=" * 60)
+    
     if ransac_option == "ransac":
         logger.info("Using standard RANSAC for geometric verification")
         ransac_options = dict(ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1))
@@ -457,6 +625,14 @@ def estimation_and_geometric_verification(
             pairs_path,
             options=ransac_options,
         )
+    
+    total_time = time.time() - start_time
+    logger.info("=" * 60)
+    logger.info("🏁 STANDARD RANSAC VERIFICATION COMPLETED")
+    logger.info("=" * 60)
+    logger.info(f"⏱️  Total time: {total_time:.2f} seconds")
+    logger.info(f"🚀 COLMAP handled all internal statistics and processing")
+    logger.info("=" * 60)
 
 
 def geometric_verification(

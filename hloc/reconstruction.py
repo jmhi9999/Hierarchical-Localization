@@ -15,6 +15,7 @@ from .triangulation import (
     import_matches,
     parse_option_args,
 )
+from .robust_mapper_options import get_robust_mapper_options
 from .utils.database import COLMAPDatabase
 
 
@@ -185,6 +186,7 @@ def main(
         # Provide helpful information about RANSAC dependencies
         if ransac_option == "magsac":
             logger.info("Using MAGSAC - requires 'pip install pymagsac'")
+            logger.info("MAGSAC parameters optimized for better reconstruction coverage")
         elif ransac_option == "kornia_ransac":
             logger.info("Using Kornia RANSAC - requires 'pip install kornia torch'")
         elif ransac_option == "loransac":
@@ -198,6 +200,16 @@ def main(
             logger.error(f"Failed to use {ransac_option}: {e}")
             logger.info("Falling back to standard RANSAC...")
             estimation_and_geometric_verification(database, pairs, verbose, "ransac")
+    # Get optimized mapper options based on RANSAC method
+    if mapper_options is None:
+        mapper_options = {}
+    
+    # Merge with robust options optimized for the RANSAC method
+    robust_options = get_robust_mapper_options(ransac_option)
+    mapper_options = {**robust_options, **mapper_options}  # User options override
+    
+    logger.info(f"Using optimized mapper options for {ransac_option}: {list(robust_options.keys())}")
+    
     reconstruction = run_reconstruction(
         sfm_dir, database, image_dir, verbose, mapper_options
     )
