@@ -34,6 +34,21 @@ from .utils.io import get_keypoints, get_matches
 from .utils.parsers import parse_retrieval
 
 
+def reshape_keypoints(keypoints_blob):
+    """Safely reshape keypoints blob to 2D coordinates."""
+    keypoints = np.frombuffer(keypoints_blob, dtype=np.float32)
+    num_keypoints = len(keypoints)
+    
+    # Try different column counts: 2, 4, 6
+    for cols in [2, 4, 6]:
+        if num_keypoints % cols == 0:
+            rows = num_keypoints // cols
+            return keypoints.reshape(rows, cols)[:, :2]  # Return only x, y coordinates
+    
+    # Fallback: assume 2 columns
+    return keypoints.reshape(-1, 2)
+
+
 class OutputCapture:
     def __init__(self, verbose: bool):
         self.verbose = verbose
@@ -176,8 +191,8 @@ def kornia_geometric_verification(
                 continue
                 
             # Convert to numpy arrays
-            kpts0 = np.frombuffer(kpts0[0], dtype=np.float32).reshape(-1, 6)[:, :2]
-            kpts1 = np.frombuffer(kpts1[0], dtype=np.float32).reshape(-1, 6)[:, :2]
+            kpts0 = reshape_keypoints(kpts0[0])
+            kpts1 = reshape_keypoints(kpts1[0])
             matches = np.frombuffer(matches_data[0], dtype=np.uint32).reshape(-1, 2)
             
             if len(matches) < 8:
@@ -282,8 +297,8 @@ def magsac_geometric_verification(
             continue
             
         # Convert to numpy arrays
-        kpts0 = np.frombuffer(kpts0[0], dtype=np.float32).reshape(-1, 6)[:, :2]  # x, y coords only
-        kpts1 = np.frombuffer(kpts1[0], dtype=np.float32).reshape(-1, 6)[:, :2]
+        kpts0 = reshape_keypoints(kpts0[0])
+        kpts1 = reshape_keypoints(kpts1[0])
         matches = np.frombuffer(matches_data[0], dtype=np.uint32).reshape(-1, 2)
         
         if len(matches) < 8:  # Need at least 8 points for fundamental matrix
