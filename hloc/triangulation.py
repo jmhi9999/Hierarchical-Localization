@@ -4,10 +4,20 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pycolmap
-import torch
-import kornia as K
 from tqdm import tqdm
-import cv2
+
+try:
+    import kornia
+    import torch
+    KORNIA_AVAILABLE = True
+except ImportError:
+    KORNIA_AVAILABLE = False
+
+try:
+    import pymagsac
+    MAGSAC_AVAILABLE = True
+except ImportError:
+    MAGSAC_AVAILABLE = False
 
 from . import logger
 from .utils.database import COLMAPDatabase
@@ -105,414 +115,236 @@ def import_matches(
     db.close()
 
 
-def estimation_and_geometric_verification(
+def kornia_geometric_verification(
     database_path: Path, pairs_path: Path, verbose: bool = False
 ):
-    logger.info("Performing geometric verification of the matches...")
+    """Custom Kornia RANSAC implementation for geometric verification."""
+    if not KORNIA_AVAILABLE:
+        logger.error("Kornia is not available. Please install kornia: pip install kornia")
+        raise ImportError("kornia is required for kornia_ransac option")
+    
+    logger.info("Performing geometric verification using Kornia RANSAC...")
+    
+    # Load pairs
+    with open(str(pairs_path), "r") as f:
+        pairs = [p.split() for p in f.readlines()]
+    
+    db = COLMAPDatabase.connect(database_path)
+    
+    # Process each pair with Kornia RANSAC
+    for name0, name1 in tqdm(pairs, desc="Kornia RANSAC verification"):
+        # Get matches from database
+        image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
+        image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
+        
+        if image_id0 is None or image_id1 is None:
+            continue
+            
+        image_id0, image_id1 = image_id0[0], image_id1[0]
+        
+        # Get keypoints and matches
+        kpts0 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id0,)).fetchone()
+        kpts1 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id1,)).fetchone()
+        matches_data = db.execute("SELECT data FROM matches WHERE pair_id = ?", 
+                                 (db.pair_id_from_image_ids(image_id0, image_id1),)).fetchone()
+        
+        if kpts0 is None or kpts1 is None or matches_data is None:
+            continue
+            
+        # Convert to numpy arrays
+        kpts0 = np.frombuffer(kpts0[0], dtype=np.float32).reshape(-1, 6)[:, :2]  # x, y coords only
+        kpts1 = np.frombuffer(kpts1[0], dtype=np.float32).reshape(-1, 6)[:, :2]
+        matches = np.frombuffer(matches_data[0], dtype=np.uint32).reshape(-1, 2)
+        
+        if len(matches) < 8:  # Need at least 8 points for fundamental matrix
+            db.add_two_view_geometry(image_id0, image_id1, matches)
+            continue
+        
+        # Extract matched keypoints
+        matched_kpts0 = kpts0[matches[:, 0]]
+        matched_kpts1 = kpts1[matches[:, 1]]
+        
+        # Convert to torch tensors
+        pts0 = torch.from_numpy(matched_kpts0).float()
+        pts1 = torch.from_numpy(matched_kpts1).float()
+        
+        try:
+            # Use Kornia's RANSAC for fundamental matrix estimation
+            F, inliers = kornia.geometry.epipolar.find_fundamental(
+                pts0.unsqueeze(0), pts1.unsqueeze(0),
+                method=kornia.geometry.epipolar.SolverType.SEVEN_POINT,
+                ransac_reproj_threshold=1.0,
+                ransac_max_iter=5000,
+                ransac_confidence=0.99
+            )
+            
+            # Check if fundamental matrix was found
+            if F is None or inliers is None:
+                logger.warning(f"Kornia RANSAC failed to find fundamental matrix for pair {name0}-{name1}")
+                db.add_two_view_geometry(image_id0, image_id1, matches)
+                continue
+            
+            # Extract inlier matches
+            inlier_mask = inliers.squeeze().numpy().astype(bool)
+            inlier_matches = matches[inlier_mask]
+            
+            # Add inlier matches to database
+            db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
+            
+        except Exception as e:
+            logger.warning(f"Kornia RANSAC failed for pair {name0}-{name1}: {e}")
+            # Fall back to all matches if RANSAC fails
+            db.add_two_view_geometry(image_id0, image_id1, matches)
+    
+    db.commit()
+    db.close()
+
+
+def magsac_geometric_verification(
+    database_path: Path, pairs_path: Path, verbose: bool = False
+):
+    """Custom MAGSAC implementation for geometric verification."""
+    if not MAGSAC_AVAILABLE:
+        logger.error("PyMAGSAC is not available. Please install: pip install pymagsac")
+        raise ImportError("pymagsac is required for magsac option")
+    
+    logger.info("Performing geometric verification using MAGSAC...")
+    
+    # Load pairs
+    with open(str(pairs_path), "r") as f:
+        pairs = [p.split() for p in f.readlines()]
+    
+    db = COLMAPDatabase.connect(database_path)
+    
+    # Process each pair with MAGSAC
+    for name0, name1 in tqdm(pairs, desc="MAGSAC verification"):
+        # Get matches from database
+        image_id0 = db.execute("SELECT image_id FROM images WHERE name = ?", (name0,)).fetchone()
+        image_id1 = db.execute("SELECT image_id FROM images WHERE name = ?", (name1,)).fetchone()
+        
+        if image_id0 is None or image_id1 is None:
+            continue
+            
+        image_id0, image_id1 = image_id0[0], image_id1[0]
+        
+        # Get keypoints and matches
+        kpts0 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id0,)).fetchone()
+        kpts1 = db.execute("SELECT data FROM keypoints WHERE image_id = ?", (image_id1,)).fetchone()
+        matches_data = db.execute("SELECT data FROM matches WHERE pair_id = ?", 
+                                 (db.pair_id_from_image_ids(image_id0, image_id1),)).fetchone()
+        
+        if kpts0 is None or kpts1 is None or matches_data is None:
+            continue
+            
+        # Convert to numpy arrays
+        kpts0 = np.frombuffer(kpts0[0], dtype=np.float32).reshape(-1, 6)[:, :2]  # x, y coords only
+        kpts1 = np.frombuffer(kpts1[0], dtype=np.float32).reshape(-1, 6)[:, :2]
+        matches = np.frombuffer(matches_data[0], dtype=np.uint32).reshape(-1, 2)
+        
+        if len(matches) < 8:  # Need at least 8 points for fundamental matrix
+            db.add_two_view_geometry(image_id0, image_id1, matches)
+            continue
+        
+        # Extract matched keypoints
+        matched_kpts0 = kpts0[matches[:, 0]]
+        matched_kpts1 = kpts1[matches[:, 1]]
+        
+        try:
+            # Use pymagsac for fundamental matrix estimation
+            F, inliers = pymagsac.findFundamentalMatrix(
+                matched_kpts0, matched_kpts1,
+                threshold=1.0,
+                conf=0.99,
+                maxIters=10000,
+                # MAGSAC specific parameters
+                sampler=0,  # 0: PROSAC, 1: P-NAPSAC, 2: NG_RANSAC
+                scorer=1,   # 0: RANSAC, 1: MSAC, 2: MLESAC, 3: MAGSAC
+                neighborhood_size=20
+            )
+            
+            # Check if fundamental matrix was found
+            if F is None or inliers is None:
+                logger.warning(f"MAGSAC failed to find fundamental matrix for pair {name0}-{name1}")
+                db.add_two_view_geometry(image_id0, image_id1, matches)
+                continue
+            
+            # Extract inlier matches
+            inlier_matches = matches[inliers.astype(bool)]
+            
+            # Add inlier matches to database
+            db.add_two_view_geometry(image_id0, image_id1, inlier_matches)
+            
+        except Exception as e:
+            logger.warning(f"MAGSAC failed for pair {name0}-{name1}: {e}")
+            # Fall back to all matches if MAGSAC fails
+            db.add_two_view_geometry(image_id0, image_id1, matches)
+    
+    db.commit()
+    db.close()
+
+
+def loransac_geometric_verification(
+    database_path: Path, pairs_path: Path, verbose: bool = False
+):
+    """LORANSAC implementation using COLMAP's built-in support."""
+    logger.info("Performing geometric verification using LORANSAC...")
+    
+    # LORANSAC in COLMAP typically requires specific TwoViewGeometry options
+    # This is a more conservative approach using COLMAP's internal LORANSAC
+    ransac_options = dict(
+        two_view_geometry=dict(
+            multiple_models=True,  # Enable multiple model estimation
+            compute_relative_pose=True,
+            ransac=dict(
+                max_num_trials=8000,  # Reduced for LORANSAC's higher computational cost
+                min_inlier_ratio=0.05,  # Lower threshold for LORANSAC
+                confidence=0.9999,
+                max_error=1.5,  # Tighter error threshold
+            )
+        )
+    )
+    
     with OutputCapture(verbose):
         pycolmap.verify_matches(
             database_path,
             pairs_path,
-            options=dict(ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1)),
+            options=ransac_options,
         )
 
 
-def magsac_verification_no_reference(
-    image_ids: Dict[str, int],
-    database_path: Path,
-    features_path: Path,
-    pairs_path: Path,
-    matches_path: Path,
-    max_error: float = 4.0,
-    ransac_confidence: float = 0.99,
-    max_iter: int = 1000,
+def estimation_and_geometric_verification(
+    database_path: Path, pairs_path: Path, verbose: bool = False, ransac_option: str = "ransac"
 ):
-    """Geometric verification using OpenCV MAGSAC++ for fundamental matrix estimation."""
-    logger.info("Performing MAGSAC++ geometric verification (no reference)...")
-    pairs = parse_retrieval(pairs_path)
-    db = COLMAPDatabase.connect(database_path)
-    inlier_ratios = []
-    matched = set()
+    logger.info(f"Performing geometric verification of the matches using {ransac_option}...")
     
-    for name0 in tqdm(pairs):
-        id0 = image_ids[name0]
-        kps0 = get_keypoints(features_path, name0)
-        
-        for name1 in pairs[name0]:
-            id1 = image_ids[name1]
-            kps1 = get_keypoints(features_path, name1)
-            matches = get_matches(matches_path, name0, name1)[0]
-            
-            if len({(id0, id1), (id1, id0)} & matched) > 0:
-                continue
-            matched |= {(id0, id1), (id1, id0)}
-            
-            if matches.shape[0] == 0:
-                db.add_two_view_geometry(id0, id1, matches)
-                continue
-                
-            # Use MAGSAC++ for fundamental matrix estimation
-            if matches.shape[0] >= 8:  # Need at least 8 points for fundamental matrix
-                try:
-                    pts0 = kps0[matches[:, 0]].astype(np.float32)
-                    pts1 = kps1[matches[:, 1]].astype(np.float32)
-                    
-                    # Apply MAGSAC++ to find fundamental matrix and inliers
-                    # Use lower confidence for speed vs RANSAC's 0.99
-                    F, inlier_mask = cv2.findFundamentalMat(
-                        pts0, pts1,
-                        method=cv2.USAC_MAGSAC,
-                        ransacReprojThreshold=max_error,
-                        confidence=0.95,  # Lower than RANSAC for speed
-                        maxIters=max_iter
-                    )
-                    
-                    if inlier_mask is not None:
-                        inlier_mask = inlier_mask.ravel().astype(bool)
-                        valid_matches = matches[inlier_mask]
-                    else:
-                        valid_matches = matches
-                    
-                except Exception as e:
-                    logger.debug(f"MAGSAC++ failed for {name0}-{name1}: {e}, using all matches")
-                    valid_matches = matches
-            else:
-                # Not enough points for fundamental matrix, use all matches
-                valid_matches = matches
-                
-            db.add_two_view_geometry(id0, id1, valid_matches)
-            inlier_ratios.append(len(valid_matches) / len(matches) if len(matches) > 0 else 0)
+    # Handle special RANSAC implementations separately
+    if ransac_option == "kornia_ransac":
+        logger.info("Using Kornia RANSAC for geometric verification")
+        kornia_geometric_verification(database_path, pairs_path, verbose)
+        return
+    elif ransac_option == "magsac":
+        logger.info("Using MAGSAC for geometric verification")
+        magsac_geometric_verification(database_path, pairs_path, verbose)
+        return
+    elif ransac_option == "loransac":
+        logger.info("Using LORANSAC for geometric verification")
+        loransac_geometric_verification(database_path, pairs_path, verbose)
+        return
     
-    logger.info(
-        "mean/med/min/max valid matches %.2f/%.2f/%.2f/%.2f%%.",
-        np.mean(inlier_ratios) * 100,
-        np.median(inlier_ratios) * 100,
-        np.min(inlier_ratios) * 100,
-        np.max(inlier_ratios) * 100,
-    )
-    db.commit()
-    db.close()
-
-
-def kornia_ransac_verification_no_reference(
-    image_ids: Dict[str, int],
-    database_path: Path,
-    features_path: Path,
-    pairs_path: Path,
-    matches_path: Path,
-    max_error: float = 4.0,
-    ransac_confidence: float = 0.99,
-    max_iter: int = 2000,
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-):
-    """Geometric verification using Kornia GPU-based RANSAC without reference model."""
-    logger.info(f"Performing Kornia GPU-based geometric verification (no reference) on {device}...")
-    pairs = parse_retrieval(pairs_path)
-    db = COLMAPDatabase.connect(database_path)
-    inlier_ratios = []
-    matched = set()
+    # Standard RANSAC using COLMAP's default implementation
+    if ransac_option == "ransac":
+        logger.info("Using standard RANSAC for geometric verification")
+        ransac_options = dict(ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1))
+    else:
+        logger.warning(f"Unknown RANSAC option: {ransac_option}. Using default RANSAC.")
+        ransac_options = dict(ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1))
     
-    for name0 in tqdm(pairs):
-        id0 = image_ids[name0]
-        kps0 = get_keypoints(features_path, name0)
-        
-        for name1 in pairs[name0]:
-            id1 = image_ids[name1]
-            kps1 = get_keypoints(features_path, name1)
-            matches = get_matches(matches_path, name0, name1)[0]
-            
-            if len({(id0, id1), (id1, id0)} & matched) > 0:
-                continue
-            matched |= {(id0, id1), (id1, id0)}
-            
-            if matches.shape[0] == 0:
-                db.add_two_view_geometry(id0, id1, matches)
-                continue
-                
-            # Use Kornia RANSAC for fundamental matrix estimation
-            if matches.shape[0] >= 8:  # Need at least 8 points for fundamental matrix
-                try:
-                    # Extract matched keypoints
-                    pts0 = kps0[matches[:, 0]]
-                    pts1 = kps1[matches[:, 1]]
-                    
-                    # Convert to torch tensors with proper shape for Kornia
-                    # Use non_blocking=True for faster GPU transfer
-                    pts0_tensor = torch.from_numpy(pts0).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
-                    pts1_tensor = torch.from_numpy(pts1).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
-                    
-                    # Use Kornia's find_fundamental function directly
-                    F, inliers = K.geometry.ransac.find_fundamental(
-                        pts0_tensor, pts1_tensor,
-                        threshold=max_error,
-                        confidence=ransac_confidence,
-                        max_iter=max_iter
-                    )
-                    
-                    # Get inlier mask - inliers is a boolean tensor
-                    inlier_mask = inliers.squeeze(0).cpu().numpy().astype(bool)
-                    valid_matches = matches[inlier_mask]
-                    
-                    # Check if we have enough inliers
-                    if len(valid_matches) < 8:
-                        logger.debug(f"Kornia RANSAC: insufficient inliers for {name0}-{name1}: {len(valid_matches)} < 8")
-                        valid_matches = matches  # Use all matches as fallback
-                    
-                except Exception as e:
-                    logger.debug(f"Kornia RANSAC failed for {name0}-{name1}: {e}, using all matches")
-                    valid_matches = matches
-            else:
-                # Not enough points for fundamental matrix, use all matches
-                valid_matches = matches
-                
-            db.add_two_view_geometry(id0, id1, valid_matches)
-            inlier_ratios.append(len(valid_matches) / len(matches) if len(matches) > 0 else 0)
-    
-    logger.info(
-        "mean/med/min/max valid matches %.2f/%.2f/%.2f/%.2f%%.",
-        np.mean(inlier_ratios) * 100,
-        np.median(inlier_ratios) * 100,
-        np.min(inlier_ratios) * 100,
-        np.max(inlier_ratios) * 100,
-    )
-    db.commit()
-    db.close()
-
-
-
-
-def magsac_geometric_verification(
-    image_ids: Dict[str, int],
-    reference: pycolmap.Reconstruction,
-    database_path: Path,
-    features_path: Path,
-    pairs_path: Path,
-    matches_path: Path,
-    max_error: float = 4.0,
-    ransac_confidence: float = 0.99,
-    max_iter: int = 1000,
-):
-    """Geometric verification using OpenCV MAGSAC++ for fundamental matrix estimation."""
-    logger.info("Performing MAGSAC++ geometric verification...")
-
-    pairs = parse_retrieval(pairs_path)
-    db = COLMAPDatabase.connect(database_path)
-
-    inlier_ratios = []
-    matched = set()
-    
-    for name0 in tqdm(pairs):
-        id0 = image_ids[name0]
-        image0 = reference.images[id0]
-        cam0 = reference.cameras[image0.camera_id]
-        kps0, noise0 = get_keypoints(features_path, name0, return_uncertainty=True)
-        noise0 = 1.0 if noise0 is None else noise0
-        if len(kps0) > 0:
-            kps0 = np.stack(cam0.cam_from_img(kps0))
-        else:
-            kps0 = np.zeros((0, 2))
-
-        for name1 in pairs[name0]:
-            id1 = image_ids[name1]
-            image1 = reference.images[id1]
-            cam1 = reference.cameras[image1.camera_id]
-            kps1, noise1 = get_keypoints(features_path, name1, return_uncertainty=True)
-            noise1 = 1.0 if noise1 is None else noise1
-            if len(kps1) > 0:
-                kps1 = np.stack(cam1.cam_from_img(kps1))
-            else:
-                kps1 = np.zeros((0, 2))
-
-            matches = get_matches(matches_path, name0, name1)[0]
-
-            if len({(id0, id1), (id1, id0)} & matched) > 0:
-                continue
-            matched |= {(id0, id1), (id1, id0)}
-
-            if matches.shape[0] == 0:
-                db.add_two_view_geometry(id0, id1, matches)
-                continue
-
-            # Use MAGSAC++ for fundamental matrix estimation
-            if matches.shape[0] >= 8:  # Need at least 8 points for fundamental matrix
-                try:
-                    pts0 = kps0[matches[:, 0]].astype(np.float32)
-                    pts1 = kps1[matches[:, 1]].astype(np.float32)
-                    
-                    # Apply MAGSAC++ to find fundamental matrix and inliers
-                    # Use lower confidence for speed vs RANSAC's 0.99
-                    F, inlier_mask = cv2.findFundamentalMat(
-                        pts0, pts1,
-                        method=cv2.USAC_MAGSAC,
-                        ransacReprojThreshold=max_error,
-                        confidence=0.95,  # Lower than RANSAC for speed
-                        maxIters=max_iter
-                    )
-                    
-                    if inlier_mask is not None:
-                        inlier_mask = inlier_mask.ravel().astype(bool)
-                        valid_matches = matches[inlier_mask]
-                    else:
-                        raise RuntimeError("No inliers found")
-                        
-                except Exception as e:
-                    logger.debug(f"MAGSAC++ failed for {name0}-{name1}: {e}, falling back to epipolar error")
-                    # Fallback to original epipolar error method
-                    cam1_from_cam0 = image1.cam_from_world() * image0.cam_from_world().inverse()
-                    errors0, errors1 = compute_epipolar_errors(
-                        cam1_from_cam0, kps0[matches[:, 0]], kps1[matches[:, 1]]
-                    )
-                    valid_mask = np.logical_and(
-                        errors0 <= cam0.cam_from_img_threshold(noise0 * max_error),
-                        errors1 <= cam1.cam_from_img_threshold(noise1 * max_error),
-                    )
-                    valid_matches = matches[valid_mask]
-            else:
-                # Not enough points for fundamental matrix, use original method
-                cam1_from_cam0 = image1.cam_from_world() * image0.cam_from_world().inverse()
-                errors0, errors1 = compute_epipolar_errors(
-                    cam1_from_cam0, kps0[matches[:, 0]], kps1[matches[:, 1]]
-                )
-                valid_mask = np.logical_and(
-                    errors0 <= cam0.cam_from_img_threshold(noise0 * max_error),
-                    errors1 <= cam1.cam_from_img_threshold(noise1 * max_error),
-                )
-                valid_matches = matches[valid_mask]
-
-            db.add_two_view_geometry(id0, id1, valid_matches)
-            inlier_ratios.append(len(valid_matches) / len(matches) if len(matches) > 0 else 0)
-
-    logger.info(
-        "mean/med/min/max valid matches %.2f/%.2f/%.2f/%.2f%%.",
-        np.mean(inlier_ratios) * 100,
-        np.median(inlier_ratios) * 100,
-        np.min(inlier_ratios) * 100,
-        np.max(inlier_ratios) * 100,
-    )
-
-    db.commit()
-    db.close()
-
-
-def kornia_ransac_geometric_verification(
-    image_ids: Dict[str, int],
-    reference: pycolmap.Reconstruction,
-    database_path: Path,
-    features_path: Path,
-    pairs_path: Path,
-    matches_path: Path,
-    max_error: float = 4.0,
-    ransac_confidence: float = 0.99,
-    max_iter: int = 2000,
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-):
-    """Geometric verification using Kornia GPU-based RANSAC for fundamental matrix estimation."""
-    logger.info(f"Performing Kornia GPU-based geometric verification on {device}...")
-
-    pairs = parse_retrieval(pairs_path)
-    db = COLMAPDatabase.connect(database_path)
-
-    inlier_ratios = []
-    matched = set()
-    
-    for name0 in tqdm(pairs):
-        id0 = image_ids[name0]
-        image0 = reference.images[id0]
-        cam0 = reference.cameras[image0.camera_id]
-        kps0, noise0 = get_keypoints(features_path, name0, return_uncertainty=True)
-        noise0 = 1.0 if noise0 is None else noise0
-        if len(kps0) > 0:
-            kps0 = np.stack(cam0.cam_from_img(kps0))
-        else:
-            kps0 = np.zeros((0, 2))
-
-        for name1 in pairs[name0]:
-            id1 = image_ids[name1]
-            image1 = reference.images[id1]
-            cam1 = reference.cameras[image1.camera_id]
-            kps1, noise1 = get_keypoints(features_path, name1, return_uncertainty=True)
-            noise1 = 1.0 if noise1 is None else noise1
-            if len(kps1) > 0:
-                kps1 = np.stack(cam1.cam_from_img(kps1))
-            else:
-                kps1 = np.zeros((0, 2))
-
-            matches = get_matches(matches_path, name0, name1)[0]
-
-            if len({(id0, id1), (id1, id0)} & matched) > 0:
-                continue
-            matched |= {(id0, id1), (id1, id0)}
-
-            if matches.shape[0] == 0:
-                db.add_two_view_geometry(id0, id1, matches)
-                continue
-
-            # Use Kornia RANSAC for fundamental matrix estimation
-            if matches.shape[0] >= 8:  # Need at least 8 points for fundamental matrix
-                try:
-                    # Extract matched keypoints
-                    pts0 = kps0[matches[:, 0]]
-                    pts1 = kps1[matches[:, 1]]
-                    
-                    # Convert to torch tensors with proper shape for Kornia
-                    # Use non_blocking=True for faster GPU transfer
-                    pts0_tensor = torch.from_numpy(pts0).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
-                    pts1_tensor = torch.from_numpy(pts1).float().to(device, non_blocking=True).unsqueeze(0)  # [1, N, 2]
-                    
-                    # Use Kornia's find_fundamental function directly
-                    F, inliers = K.geometry.ransac.find_fundamental(
-                        pts0_tensor, pts1_tensor,
-                        threshold=max_error,
-                        confidence=ransac_confidence,
-                        max_iter=max_iter
-                    )
-                    
-                    # Get inlier mask - inliers is a boolean tensor
-                    inlier_mask = inliers.squeeze(0).cpu().numpy().astype(bool)
-                    valid_matches = matches[inlier_mask]
-                    
-                    # Check if we have enough inliers
-                    if len(valid_matches) < 8:
-                        logger.debug(f"Kornia RANSAC: insufficient inliers for {name0}-{name1}: {len(valid_matches)} < 8")
-                        raise RuntimeError("Insufficient inliers")
-                        
-                except Exception as e:
-                    logger.debug(f"Kornia RANSAC failed for {name0}-{name1}: {e}, falling back to epipolar error")
-                    # Fallback to original epipolar error method
-                    cam1_from_cam0 = image1.cam_from_world() * image0.cam_from_world().inverse()
-                    errors0, errors1 = compute_epipolar_errors(
-                        cam1_from_cam0, kps0[matches[:, 0]], kps1[matches[:, 1]]
-                    )
-                    valid_mask = np.logical_and(
-                        errors0 <= cam0.cam_from_img_threshold(noise0 * max_error),
-                        errors1 <= cam1.cam_from_img_threshold(noise1 * max_error),
-                    )
-                    valid_matches = matches[valid_mask]
-            else:
-                # Not enough points for fundamental matrix, use original method
-                cam1_from_cam0 = image1.cam_from_world() * image0.cam_from_world().inverse()
-                errors0, errors1 = compute_epipolar_errors(
-                    cam1_from_cam0, kps0[matches[:, 0]], kps1[matches[:, 1]]
-                )
-                valid_mask = np.logical_and(
-                    errors0 <= cam0.cam_from_img_threshold(noise0 * max_error),
-                    errors1 <= cam1.cam_from_img_threshold(noise1 * max_error),
-                )
-                valid_matches = matches[valid_mask]
-
-            db.add_two_view_geometry(id0, id1, valid_matches)
-            inlier_ratios.append(len(valid_matches) / len(matches) if len(matches) > 0 else 0)
-
-    logger.info(
-        "mean/med/min/max valid matches %.2f/%.2f/%.2f/%.2f%%.",
-        np.mean(inlier_ratios) * 100,
-        np.median(inlier_ratios) * 100,
-        np.min(inlier_ratios) * 100,
-        np.max(inlier_ratios) * 100,
-    )
-
-    db.commit()
-    db.close()
+    with OutputCapture(verbose):
+        pycolmap.verify_matches(
+            database_path,
+            pairs_path,
+            options=ransac_options,
+        )
 
 
 def geometric_verification(
@@ -615,11 +447,10 @@ def main(
     matches: Path,
     skip_geometric_verification: bool = False,
     estimate_two_view_geometries: bool = False,
-    use_kornia_ransac: bool = False,
-    use_magsac: bool = False,
     min_match_score: Optional[float] = None,
     verbose: bool = False,
     mapper_options: Optional[Dict[str, Any]] = None,
+    ransac_option: str = "ransac",
 ) -> pycolmap.Reconstruction:
     assert reference_model.exists(), reference_model
     assert features.exists(), features
@@ -642,15 +473,7 @@ def main(
     )
     if not skip_geometric_verification:
         if estimate_two_view_geometries:
-            estimation_and_geometric_verification(database, pairs, verbose)
-        elif use_kornia_ransac:
-            kornia_ransac_geometric_verification(
-                image_ids, reference, database, features, pairs, matches
-            )
-        elif use_magsac:
-            magsac_geometric_verification(
-                image_ids, reference, database, features, pairs, matches
-            )
+            estimation_and_geometric_verification(database, pairs, verbose, ransac_option)
         else:
             geometric_verification(
                 image_ids, reference, database, features, pairs, matches
@@ -697,12 +520,19 @@ if __name__ == "__main__":
     parser.add_argument("--matches", type=Path, required=True)
 
     parser.add_argument("--skip_geometric_verification", action="store_true")
-    parser.add_argument("--use_kornia_ransac", action="store_true", 
-                       help="Use Kornia GPU-based RANSAC for geometric verification")
-    parser.add_argument("--use_magsac", action="store_true", 
-                       help="Use OpenCV MAGSAC++ for geometric verification")
     parser.add_argument("--min_match_score", type=float)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--ransac_option",
+        type=str,
+        default="ransac",
+        choices=["ransac", "magsac", "loransac", "kornia_ransac"],
+        help="RANSAC algorithm to use for geometric verification. "
+             "ransac: Standard RANSAC (default, fast). "
+             "magsac: MAGSAC (requires pymagsac). "
+             "loransac: LORANSAC (slower but more accurate). "
+             "kornia_ransac: Kornia RANSAC (requires kornia, torch, GPU recommended)"
+    )
     args = parser.parse_args().__dict__
 
     mapper_options = parse_option_args(

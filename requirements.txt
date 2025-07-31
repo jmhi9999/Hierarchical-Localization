@@ -17,4 +17,5 @@ scikit-learn  # For additional optimization utilities
 scipy>=1.7.0  # Updated version for spatial.transform.Rotation
 torch>=1.8.0  # Updated for better CUDA support in LightGlue
 pydegensac  # For robust RANSAC-based pose estimation (fallback: pydengensac)
+pymagsac  # For MAGSAC RANSAC implementation
 scipy>=1.7.0  # Required for spatial.transform.Rotation
