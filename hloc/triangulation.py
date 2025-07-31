@@ -218,8 +218,8 @@ def kornia_geometric_verification(
         pts1 = torch.from_numpy(matched_kpts1).float().to(device)
         
         try:
-            # Kornia's 7POINT method requires exactly 7 points
-            if len(pts0) < 7:
+            # Kornia fundamental matrix estimation
+            if len(pts0) < 8:
                 db.add_two_view_geometry(image_id0, image_id1, matches)
                 stats['failed_pairs'] += 1
                 continue
@@ -230,11 +230,57 @@ def kornia_geometric_verification(
                     method='7POINT'
                 )
             else:
-                # More than 7 points - use RANSAC approach with random sampling
-                F = kornia.geometry.epipolar.find_fundamental(
-                    pts0.unsqueeze(0), pts1.unsqueeze(0),
-                    method='RANSAC'  # Use RANSAC for variable number of points
-                )
+                # 8 or more points - use 8POINT method (Kornia doesn't have built-in RANSAC)
+                # We'll implement our own RANSAC loop
+                best_F = None
+                best_inliers = 0
+                best_inlier_mask = None
+                
+                # RANSAC parameters
+                max_iterations = 1000
+                threshold = 1.0
+                min_inliers = 8
+                
+                for _ in range(max_iterations):
+                    # Sample 8 random points
+                    if len(pts0) >= 8:
+                        indices = torch.randperm(len(pts0))[:8].to(device)
+                        sample_pts0 = pts0[indices].unsqueeze(0)
+                        sample_pts1 = pts1[indices].unsqueeze(0)
+                        
+                        try:
+                            F_sample = kornia.geometry.epipolar.find_fundamental(
+                                sample_pts0, sample_pts1, method='8POINT'
+                            )
+                            
+                            if F_sample is not None:
+                                # Test all points against this F matrix
+                                F_np = F_sample.squeeze().cpu().numpy()
+                                
+                                # Convert to homogeneous coordinates  
+                                matched_kpts0_np = matched_kpts0
+                                matched_kpts1_np = matched_kpts1
+                                pts0_homo = np.column_stack([matched_kpts0_np, np.ones(len(matched_kpts0_np))])
+                                pts1_homo = np.column_stack([matched_kpts1_np, np.ones(len(matched_kpts1_np))])
+                                
+                                # Compute epipolar distances
+                                epilines1 = (F_np @ pts0_homo.T).T
+                                epilines0 = (F_np.T @ pts1_homo.T).T
+                                
+                                dists1 = np.abs(np.sum(epilines1 * pts1_homo, axis=1)) / np.sqrt(epilines1[:, 0]**2 + epilines1[:, 1]**2)
+                                dists0 = np.abs(np.sum(epilines0 * pts0_homo, axis=1)) / np.sqrt(epilines0[:, 0]**2 + epilines0[:, 1]**2)
+                                
+                                inlier_mask = (dists0 <= threshold) & (dists1 <= threshold)
+                                num_inliers = np.sum(inlier_mask)
+                                
+                                if num_inliers > best_inliers and num_inliers >= min_inliers:
+                                    best_F = F_sample
+                                    best_inliers = num_inliers
+                                    best_inlier_mask = inlier_mask
+                        except:
+                            continue
+                
+                F = best_F
             
             # Check if fundamental matrix was found
             if F is None:
@@ -242,23 +288,28 @@ def kornia_geometric_verification(
                 stats['failed_pairs'] += 1
                 continue
             
-            # Compute epipolar distances to find inliers
-            F_np = F.squeeze().cpu().numpy()
+            # Use the best inlier mask from RANSAC if available, otherwise compute fresh
+            if len(pts0) > 7 and best_inlier_mask is not None:
+                inlier_mask = best_inlier_mask
+            else:
+                # Compute epipolar distances to find inliers
+                F_np = F.squeeze().cpu().numpy()
+                
+                # Convert to homogeneous coordinates
+                pts0_homo = np.column_stack([matched_kpts0, np.ones(len(matched_kpts0))])
+                pts1_homo = np.column_stack([matched_kpts1, np.ones(len(matched_kpts1))])
+                
+                # Compute epipolar distances
+                epilines1 = (F_np @ pts0_homo.T).T  # Lines in image 1
+                epilines0 = (F_np.T @ pts1_homo.T).T  # Lines in image 0
+                
+                # Distance from points to epipolar lines
+                dists1 = np.abs(np.sum(epilines1 * pts1_homo, axis=1)) / np.sqrt(epilines1[:, 0]**2 + epilines1[:, 1]**2)
+                dists0 = np.abs(np.sum(epilines0 * pts0_homo, axis=1)) / np.sqrt(epilines0[:, 0]**2 + epilines0[:, 1]**2)
+                
+                # Find inliers (threshold of 1.0 pixel)
+                inlier_mask = (dists0 <= 1.0) & (dists1 <= 1.0)
             
-            # Convert to homogeneous coordinates
-            pts0_homo = np.column_stack([matched_kpts0, np.ones(len(matched_kpts0))])
-            pts1_homo = np.column_stack([matched_kpts1, np.ones(len(matched_kpts1))])
-            
-            # Compute epipolar distances
-            epilines1 = (F_np @ pts0_homo.T).T  # Lines in image 1
-            epilines0 = (F_np.T @ pts1_homo.T).T  # Lines in image 0
-            
-            # Distance from points to epipolar lines
-            dists1 = np.abs(np.sum(epilines1 * pts1_homo, axis=1)) / np.sqrt(epilines1[:, 0]**2 + epilines1[:, 1]**2)
-            dists0 = np.abs(np.sum(epilines0 * pts0_homo, axis=1)) / np.sqrt(epilines0[:, 0]**2 + epilines0[:, 1]**2)
-            
-            # Find inliers (threshold of 1.0 pixel)
-            inlier_mask = (dists0 <= 1.0) & (dists1 <= 1.0)
             inlier_matches = matches[inlier_mask]
             
             # Update statistics
@@ -377,11 +428,12 @@ def magsac_geometric_verification(
             # pymagsac API: findFundamentalMatrix(src_pts, dst_pts, sigma_max)
             F, inliers = pymagsac.findFundamentalMatrix(
                 matched_kpts0, matched_kpts1, 
-                1.5  # sigma_max (balanced between robustness and coverage)
+                3.0  # sigma_max (more lenient threshold for better coverage)
             )
             
             # Debug: Check input data quality
             if verbose and stats['processed_pairs'] < 5:  # Only for first few pairs
+                pair_key = f"{name0}-{name1}"
                 logger.info(f"MAGSAC Debug - Pair {pair_key}:")
                 logger.info(f"  Input matches: {len(matches)}")
                 logger.info(f"  Keypoints shape: {matched_kpts0.shape}, {matched_kpts1.shape}")
@@ -466,7 +518,7 @@ def loransac_geometric_verification(
             ransac=dict(
                 max_num_trials=15000,   # More iterations for LORANSAC-like behavior
                 min_inlier_ratio=0.05,  # Lower threshold for more robust estimation
-                confidence=0.9999,      # Higher confidence like LORANSAC
+                confidence=0.95,        # Lower confidence for faster convergence
                 max_error=1.5,          # Tighter error threshold
                 min_num_trials=200,     # Minimum trials for robust estimation
             )
@@ -560,7 +612,7 @@ def _opencv_loransac_verification(
                 matched_kpts0, matched_kpts1,
                 method=cv2.USAC_MAGSAC,  # MAGSAC is more robust than LORANSAC
                 ransacReprojThreshold=1.0,
-                confidence=0.999,
+                confidence=0.95,         # Lower confidence for faster convergence
                 maxIters=10000
             )
             
@@ -642,10 +694,18 @@ def estimation_and_geometric_verification(
     
     if ransac_option == "ransac":
         logger.info("Using standard RANSAC for geometric verification")
-        ransac_options = dict(ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1))
+        ransac_options = dict(ransac=dict(
+            max_num_trials=20000, 
+            min_inlier_ratio=0.1,
+            confidence=0.90  # Lower confidence for faster convergence
+        ))
     else:
         logger.warning(f"Unknown RANSAC option: {ransac_option}. Using default RANSAC.")
-        ransac_options = dict(ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1))
+        ransac_options = dict(ransac=dict(
+            max_num_trials=20000, 
+            min_inlier_ratio=0.1,
+            confidence=0.95  # Lower confidence for faster convergence
+        ))
     
     with OutputCapture(verbose):
         pycolmap.verify_matches(
