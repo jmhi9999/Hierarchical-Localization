@@ -104,10 +104,14 @@ def import_matches(
 
 
 def estimation_and_geometric_verification(
-    database_path: Path, pairs_path: Path, verbose: bool = False
+    database_path: Path, pairs_path: Path, verbose: bool = False, use_loransac: bool = True
 ):
-    logger.info("Performing OpenCV USAC LoRANSAC geometric verification...")
-    opencv_usac_estimation_and_geometric_verification(database_path, pairs_path, verbose)
+    if use_loransac:
+        logger.info("Performing LoRANSAC geometric verification...")
+        loransac_estimation_and_geometric_verification(database_path, pairs_path, verbose)
+    else:
+        logger.info("Performing OpenCV USAC MAGSAC geometric verification...")
+        opencv_usac_estimation_and_geometric_verification(database_path, pairs_path, verbose)
 
 
 def loransac_estimation_and_geometric_verification(
@@ -908,6 +912,7 @@ def main(
     min_match_score: Optional[float] = None,
     verbose: bool = False,
     mapper_options: Optional[Dict[str, Any]] = None,
+    use_loransac: bool = True,
 ) -> pycolmap.Reconstruction:
     assert reference_model.exists(), reference_model
     assert features.exists(), features
@@ -930,7 +935,7 @@ def main(
     )
     if not skip_geometric_verification:
         if estimate_two_view_geometries:
-            estimation_and_geometric_verification(database, pairs, verbose)
+            estimation_and_geometric_verification(database, pairs, verbose, use_loransac)
         else:
             geometric_verification(
                 image_ids, reference, database, features, pairs, matches
@@ -979,6 +984,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_geometric_verification", action="store_true")
     parser.add_argument("--min_match_score", type=float)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--use_loransac", action="store_true", default=True, help="Use LoRANSAC instead of MAGSAC")
     args = parser.parse_args().__dict__
 
     mapper_options = parse_option_args(
