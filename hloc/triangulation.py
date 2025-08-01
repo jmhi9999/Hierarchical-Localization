@@ -112,7 +112,7 @@ def estimation_and_geometric_verification(
 def opencv_usac_estimation_and_geometric_verification(
     database_path: Path, pairs_path: Path, verbose: bool = False
 ):
-    """Fast C++ LoRANSAC using OpenCV USAC - optimized to beat pycolmap"""
+    """Fast C++ MAGSAC using OpenCV USAC - optimized to beat pycolmap"""
     from .utils.database import image_ids_to_pair_id, blob_to_array
     
     # OpenCV USAC configuration - faster than pycolmap
@@ -135,7 +135,7 @@ def opencv_usac_estimation_and_geometric_verification(
     successful_verifications = 0
     total_pairs = 0
     
-    for name0, name1 in tqdm(pairs, desc="OpenCV USAC LoRANSAC"):
+    for name0, name1 in tqdm(pairs, desc="OpenCV USAC MAGSAC"):
         # Get image IDs
         image_id0_result = db.execute("SELECT image_id FROM images WHERE name=?", (name0,)).fetchone()
         image_id1_result = db.execute("SELECT image_id FROM images WHERE name=?", (name1,)).fetchone()
@@ -252,7 +252,7 @@ def opencv_usac_estimation_and_geometric_verification(
     
     success_rate = successful_verifications / max(total_pairs, 1) * 100
     method_name = "USAC_MAGSAC" if usac_config['method'] == cv2.USAC_MAGSAC else "USAC_FM_8PTS"
-    logger.info(f"OpenCV {method_name} LoRANSAC completed: {successful_verifications}/{total_pairs} pairs verified successfully ({success_rate:.1f}%)")
+    logger.info(f"OpenCV {method_name} MAGSAC completed: {successful_verifications}/{total_pairs} pairs verified successfully ({success_rate:.1f}%)")
 
 
 
