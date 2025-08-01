@@ -109,22 +109,6 @@ def estimation_and_geometric_verification(
     logger.info("Performing OpenCV USAC MAGSAC geometric verification...")
     opencv_usac_estimation_and_geometric_verification(database_path, pairs_path, verbose)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def opencv_usac_estimation_and_geometric_verification(
     database_path: Path, pairs_path: Path, verbose: bool = False
 ):

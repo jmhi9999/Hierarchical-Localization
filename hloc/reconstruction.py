@@ -158,7 +158,6 @@ def main(
     image_options: Optional[Dict[str, Any]] = None,
     mapper_options: Optional[Dict[str, Any]] = None,
     confidence: float = 0.9999,
-    use_loransac: bool = True,
 ) -> pycolmap.Reconstruction:
     assert features.exists(), features
     assert pairs.exists(), pairs
@@ -183,7 +182,7 @@ def main(
         skip_geometric_verification,
     )
     if not skip_geometric_verification:
-        estimation_and_geometric_verification(database, pairs, verbose, use_loransac)
+        estimation_and_geometric_verification(database, pairs, verbose)
     reconstruction = run_reconstruction(
         sfm_dir, database, image_dir, verbose, mapper_options
     )
@@ -214,7 +213,6 @@ if __name__ == "__main__":
     parser.add_argument("--min_match_score", type=float)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--confidence", type=float, default=0.9999, help="RANSAC confidence threshold")
-    parser.add_argument("--use_loransac", action="store_true", default=True, help="Use LoRANSAC instead of MAGSAC")
 
     parser.add_argument(
         "--image_options",
