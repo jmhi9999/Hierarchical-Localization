@@ -385,18 +385,7 @@ def pyransac_fundamental_matrix(pts0, pts1, matches, config, pyransac_lib):
                 local_opt_sample_size=config.get('lo_sample_size', 14)
             )
             
-        elif callable(pyransac_lib):
-            # Module is callable directly
-            F, inliers = pyransac_lib(
-                data=data,
-                model_fit_func=fit_fundamental_matrix,
-                residual_func=compute_residuals,
-                min_samples=8,
-                threshold=config['threshold'],
-                max_iterations=config['max_iterations'],
-                confidence=config['confidence']
-            )
-            
+        # Skip callable check for modules - modules are callable but not in the way we need
         else:
             # Try to find any LoRANSAC-related function
             loransac_func = None
